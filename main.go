@@ -1223,9 +1223,24 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       border: 1px solid rgba(255,255,255,.18);
       color: #edf7f5;
     }
-    .service-chip::before { content: ""; width: 9px; height: 9px; border-radius: 999px; }
-    .service-tls::before { background: #22c55e; }
-    .service-ssh::before { background: #3b82f6; }
+    .service-chip::before,
+    .kind::before {
+      content: "";
+      flex: 0 0 auto;
+      background-position: center;
+      background-repeat: no-repeat;
+      background-size: cover;
+    }
+    .service-chip::before {
+      width: 22px;
+      height: 16px;
+      border-radius: 4px;
+      box-shadow: 0 0 0 1px rgba(255,255,255,.18);
+    }
+    .service-tls::before,
+    .kind-tlsgate::before { background-image: url("/assets/porter-icon-green.png"); }
+    .service-ssh::before,
+    .kind-sshgate::before { background-image: url("/assets/porter-icon-blue.png"); }
     h1 { margin: 0; font-size: 24px; letter-spacing: 0; }
     h2 { margin: 0; font-size: 17px; letter-spacing: 0; }
     main { padding: 24px 28px 44px; display: grid; gap: 26px; }
@@ -1315,7 +1330,8 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     .status-approved, .status-active { color: var(--green); }
     .status-blocked, .status-revoked { color: var(--red); }
     .status-pending, .status-disabled { color: var(--amber); }
-    .kind { font-weight: 760; }
+    .kind { display: inline-flex; align-items: center; gap: 6px; font-weight: 760; }
+    .kind::before { width: 20px; height: 14px; border-radius: 3px; }
     .kind-tlsgate { color: var(--green); }
     .kind-sshgate { color: var(--blue); }
     .token-set { color: var(--blue); font-weight: 720; }
