@@ -1,5 +1,9 @@
 # gatehub
 
+<p align="center">
+  <img src="assets/porter-icon-blue.png" alt="Porter icon" width="260">
+</p>
+
 > **Written with AI.** This project was developed with the help of an AI
 > assistant (OpenAI's GPT-5, via Codex). The code has been reviewed and tested,
 > but treat it accordingly: read it before you run it.
