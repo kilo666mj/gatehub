@@ -1360,7 +1360,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
 <body>
   <header>
     <div class="brand">
-      <img class="mascot" src="/assets/porter-mascot-concept.png" alt="Porter mascot">
+      <img class="mascot" src="/assets/porter-mascot-app.png" alt="Porter mascot">
       <div>
         <h1>gatehub</h1>
         <span class="subtle">Porter at the control desk for TLS and SSH gates</span>
