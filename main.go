@@ -27,6 +27,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+var version = "dev"
+
 //go:embed assets/*
 var assetsFS embed.FS
 

@@ -1,0 +1,16 @@
+.git
+.agents
+.codex
+.github
+gatehub
+gatehub-*
+*.sqlite
+*.sqlite-*
+*.crt
+*.key
+*.pem
+*.env
+.env
+*.test
+coverage.out
+dist
