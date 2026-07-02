@@ -1,7 +1,7 @@
 # gatehub
 
 <p align="center">
-  <img src="assets/porter-icon-blue.png" alt="Porter icon" width="260">
+  <img src="assets/porter-mascot-concept.png" alt="Porter mascot" width="260">
 </p>
 
 > **Written with AI.** This project was developed with the help of an AI
