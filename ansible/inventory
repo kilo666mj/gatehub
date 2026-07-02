@@ -1,0 +1,2 @@
+[gatehub]
+gatehub.example.com ansible_user=root

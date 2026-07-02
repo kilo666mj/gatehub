@@ -1,0 +1,51 @@
+---
+gatehub_user: gatehub
+gatehub_group: gatehub
+gatehub_data_dir: /var/lib/gatehub
+gatehub_config_dir: /etc/gatehub
+gatehub_binary: /usr/local/bin/gatehub
+gatehub_db: "{{ gatehub_data_dir }}/gatehub.sqlite"
+
+# Internal-only admin UI/API. Bound to loopback: reach it through the
+# HTTPS reverse proxy for your admin hostname or an SSH tunnel. If the proxy
+# runs on another host, set this to 0.0.0.0:8081 - WebAuthn admin auth is
+# enforced regardless.
+gatehub_admin_listen: "127.0.0.1:8081"
+
+# Admin authentication. WebAuthn (passkey) is required by default; the RP ID and
+# origin must match the hostname the admin UI is served from. Use "none" only
+# for localhost development.
+gatehub_admin_auth: webauthn
+gatehub_admin_webauthn_rpid: gatehub.example.com
+gatehub_admin_webauthn_origin: https://gatehub.example.com
+
+# Public sync API. This is the local origin address to point a tunnel/proxy at.
+# It requires mTLS at the gatehub process.
+gatehub_public_listen: "127.0.0.1:9443"
+gatehub_public_auth: token
+gatehub_public_tls: false
+
+gatehub_public_cert: "{{ gatehub_public_tls | bool | ternary(gatehub_config_dir + '/server.crt', '') }}"
+gatehub_public_key: "{{ gatehub_public_tls | bool | ternary(gatehub_config_dir + '/server.key', '') }}"
+gatehub_client_ca: "{{ gatehub_config_dir }}/client-ca.crt"
+gatehub_client_crl: ""
+
+# If true, create a self-signed server certificate on the target when
+# gatehub_public_cert/gatehub_public_key are missing. Gate clients should trust
+# this certificate via their control_plane.ca setting.
+gatehub_generate_self_signed_server_cert: "{{ gatehub_public_tls }}"
+gatehub_self_signed_subject: "/CN=gatehub"
+gatehub_self_signed_san: "DNS:gatehub,DNS:localhost,IP:127.0.0.1"
+
+# Optional local CA certificate copied to gatehub_client_ca. Keep real values
+# in local/host vars or pass with -e; do not commit private deployment paths.
+gatehub_client_ca_src: ""
+
+gatehub_goos: linux
+gatehub_goarch_map:
+  x86_64: amd64
+  aarch64: arm64
+  arm64: arm64
+  armv7l: arm
+  armv6l: arm
+gatehub_goarch: "{{ gatehub_goarch_map.get(ansible_facts['architecture'], ansible_facts['architecture']) }}"

@@ -1,0 +1,11 @@
+gatehub
+gatehub-*
+*.sqlite
+*.sqlite-*
+*.crt
+*.key
+*.pem
+*.env
+.env
+.DS_Store
+*.retry

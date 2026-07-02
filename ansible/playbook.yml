@@ -1,0 +1,180 @@
+---
+- name: Deploy gatehub
+  hosts: gatehub
+  become: true
+
+  tasks:
+    - name: Build gatehub locally
+      ansible.builtin.command:
+        cmd: go build -trimpath -o {{ playbook_dir }}/../gatehub-{{ gatehub_goos }}-{{ gatehub_goarch }} .
+        chdir: "{{ playbook_dir }}/.."
+      environment:
+        CGO_ENABLED: "0"
+        GOOS: "{{ gatehub_goos }}"
+        GOARCH: "{{ gatehub_goarch }}"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+
+    - name: Create gatehub group
+      ansible.builtin.group:
+        name: "{{ gatehub_group }}"
+        system: true
+
+    - name: Create gatehub user
+      ansible.builtin.user:
+        name: "{{ gatehub_user }}"
+        group: "{{ gatehub_group }}"
+        home: "{{ gatehub_data_dir }}"
+        create_home: false
+        system: true
+        shell: /usr/sbin/nologin
+
+    - name: Create gatehub data directory
+      ansible.builtin.file:
+        path: "{{ gatehub_data_dir }}"
+        state: directory
+        owner: "{{ gatehub_user }}"
+        group: "{{ gatehub_group }}"
+        mode: "0750"
+
+    - name: Create gatehub config directory
+      ansible.builtin.file:
+        path: "{{ gatehub_config_dir }}"
+        state: directory
+        owner: root
+        group: "{{ gatehub_group }}"
+        mode: "0750"
+
+    - name: Install gatehub binary
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../gatehub-{{ gatehub_goos }}-{{ gatehub_goarch }}"
+        dest: "{{ gatehub_binary }}"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart gatehub
+
+    - name: Install gatehub environment
+      ansible.builtin.template:
+        src: templates/gatehub.env.j2
+        dest: "{{ gatehub_config_dir }}/gatehub.env"
+        owner: root
+        group: "{{ gatehub_group }}"
+        mode: "0640"
+      notify: Restart gatehub
+
+    - name: Check gatehub server certificate
+      ansible.builtin.stat:
+        path: "{{ gatehub_public_cert }}"
+      register: gatehub_public_cert_stat
+
+    - name: Check gatehub server key
+      ansible.builtin.stat:
+        path: "{{ gatehub_public_key }}"
+      register: gatehub_public_key_stat
+
+    - name: Generate self-signed gatehub server certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:3072
+          - -nodes
+          - -days
+          - "3650"
+          - -keyout
+          - "{{ gatehub_public_key }}"
+          - -out
+          - "{{ gatehub_public_cert }}"
+          - -subj
+          - "{{ gatehub_self_signed_subject }}"
+          - -addext
+          - "subjectAltName={{ gatehub_self_signed_san }}"
+          - -addext
+          - "extendedKeyUsage=serverAuth"
+      when:
+        - gatehub_generate_self_signed_server_cert | bool
+        - gatehub_public_tls | bool
+        - not gatehub_public_cert_stat.stat.exists or not gatehub_public_key_stat.stat.exists
+      notify: Restart gatehub
+
+    - name: Set gatehub server certificate permissions
+      ansible.builtin.file:
+        path: "{{ gatehub_public_cert }}"
+        owner: root
+        group: "{{ gatehub_group }}"
+        mode: "0640"
+      when:
+        - gatehub_public_tls | bool
+        - gatehub_public_cert_stat.stat.exists or gatehub_generate_self_signed_server_cert | bool
+
+    - name: Set gatehub server key permissions
+      ansible.builtin.file:
+        path: "{{ gatehub_public_key }}"
+        owner: root
+        group: "{{ gatehub_group }}"
+        mode: "0640"
+      when:
+        - gatehub_public_tls | bool
+        - gatehub_public_key_stat.stat.exists or gatehub_generate_self_signed_server_cert | bool
+
+    - name: Install gatehub client CA
+      ansible.builtin.copy:
+        src: "{{ gatehub_client_ca_src }}"
+        dest: "{{ gatehub_client_ca }}"
+        owner: root
+        group: "{{ gatehub_group }}"
+        mode: "0640"
+      when: gatehub_client_ca_src | length > 0
+      notify: Restart gatehub
+
+    - name: Check required TLS material exists
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ gatehub_public_cert }}"
+        - "{{ gatehub_public_key }}"
+        - "{{ gatehub_client_ca }}"
+      when: item | length > 0
+      register: gatehub_tls_files
+
+    - name: Fail when required TLS material is missing
+      ansible.builtin.fail:
+        msg: "Missing required gatehub TLS file: {{ item.item }}"
+      loop: "{{ gatehub_tls_files.results }}"
+      when:
+        - not item.skipped | default(false)
+        - not item.stat.exists
+
+    - name: Install systemd unit
+      ansible.builtin.template:
+        src: templates/gatehub.service.j2
+        dest: /etc/systemd/system/gatehub.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart gatehub
+
+    - name: Apply service changes before first start
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start gatehub
+      ansible.builtin.systemd:
+        name: gatehub
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart gatehub
+      ansible.builtin.systemd:
+        name: gatehub
+        state: restarted

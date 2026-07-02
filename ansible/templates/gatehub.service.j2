@@ -1,0 +1,33 @@
+[Unit]
+Description=gatehub fingerprint gate control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ gatehub_user }}
+Group={{ gatehub_group }}
+EnvironmentFile={{ gatehub_config_dir }}/gatehub.env
+ExecStart={{ gatehub_binary }} \
+  --db=${GATEHUB_DB} \
+  --admin-listen=${GATEHUB_ADMIN_LISTEN} \
+  --admin-auth=${GATEHUB_ADMIN_AUTH} \
+  --admin-webauthn-rpid=${GATEHUB_ADMIN_WEBAUTHN_RPID} \
+  --admin-webauthn-origin=${GATEHUB_ADMIN_WEBAUTHN_ORIGIN} \
+  --public-listen=${GATEHUB_PUBLIC_LISTEN} \
+  --public-auth=${GATEHUB_PUBLIC_AUTH} \
+  --public-cert=${GATEHUB_PUBLIC_CERT} \
+  --public-key=${GATEHUB_PUBLIC_KEY} \
+  --client-ca=${GATEHUB_CLIENT_CA} \
+  --client-crl=${GATEHUB_CLIENT_CRL}
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ gatehub_data_dir }}
+ReadOnlyPaths={{ gatehub_config_dir }}
+
+[Install]
+WantedBy=multi-user.target
