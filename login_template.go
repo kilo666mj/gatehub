@@ -55,85 +55,20 @@ const loginTemplate = `<!doctype html>
 <body>
   <div class="login-card">
     <div class="login-title">gatehub</div>
-    <div class="login-hint" id="login-hint">Checking...</div>
-    <button type="button" class="login-btn" id="login-btn" hidden>Authenticate</button>
-    <button type="button" class="login-btn" id="register-btn" hidden>Register this device</button>
+    <div class="login-hint">Sign in with your Pocket ID account to continue.</div>
+    <button type="button" class="login-btn" id="login-btn">Sign in with Pocket ID</button>
     <div class="login-error" id="login-error" hidden></div>
   </div>
 <script>
 (function() {
-  const hint = document.getElementById("login-hint");
-  const loginBtn = document.getElementById("login-btn");
-  const regBtn = document.getElementById("register-btn");
   const errEl = document.getElementById("login-error");
-
-  function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
-  function clearError() { errEl.hidden = true; }
-  function b64uToBuffer(b64u) {
-    const b64 = b64u.replace(/-/g, "+").replace(/_/g, "/").padEnd(b64u.length + (4 - b64u.length % 4) % 4, "=");
-    return Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
-  }
-  function bufferToB64u(buf) {
-    return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
-  }
-  function prepareAuthOptions(opts) {
-    const pub = opts.publicKey || opts.response || opts;
-    pub.challenge = b64uToBuffer(pub.challenge);
-    if (pub.allowCredentials) pub.allowCredentials = pub.allowCredentials.map(c => ({ ...c, id: b64uToBuffer(c.id) }));
-    return pub;
-  }
-  function prepareRegOptions(opts) {
-    const pub = opts.publicKey || opts.response || opts;
-    pub.challenge = b64uToBuffer(pub.challenge);
-    pub.user.id = b64uToBuffer(pub.user.id);
-    return pub;
-  }
-  function encodeCredential(cred) {
-    const resp = cred.response;
-    const out = { id: cred.id, rawId: bufferToB64u(cred.rawId), type: cred.type, response: { clientDataJSON: bufferToB64u(resp.clientDataJSON) } };
-    if (resp.attestationObject) out.response.attestationObject = bufferToB64u(resp.attestationObject);
-    if (resp.authenticatorData) out.response.authenticatorData = bufferToB64u(resp.authenticatorData);
-    if (resp.signature) out.response.signature = bufferToB64u(resp.signature);
-    if (resp.userHandle) out.response.userHandle = bufferToB64u(resp.userHandle);
-    if (cred.authenticatorAttachment) out.authenticatorAttachment = cred.authenticatorAttachment;
-    return out;
-  }
-  async function post(url, body) {
-    const r = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(body) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.detail || r.statusText);
-    return j;
-  }
-  async function doLogin() {
-    clearError(); loginBtn.disabled = true; loginBtn.textContent = "Waiting for passkey...";
-    try {
-      const opts = prepareAuthOptions(await post("/api/auth/login/begin", {}));
-      const cred = await navigator.credentials.get({ publicKey: opts });
-      await post("/api/auth/login/complete", encodeCredential(cred));
-      window.location.href = "/";
-    } catch (e) { showError(e.message || String(e)); }
-    finally { loginBtn.disabled = false; loginBtn.textContent = "Authenticate"; }
-  }
-  async function doRegister() {
-    clearError(); regBtn.disabled = true; regBtn.textContent = "Waiting for passkey...";
-    try {
-      const opts = prepareRegOptions(await post("/api/auth/register/begin", {}));
-      const cred = await navigator.credentials.create({ publicKey: opts });
-      await post("/api/auth/register/complete", encodeCredential(cred));
-      window.location.href = "/";
-    } catch (e) { showError(e.message || String(e)); }
-    finally { regBtn.disabled = false; regBtn.textContent = "Register this device"; }
-  }
-  loginBtn.addEventListener("click", doLogin);
-  regBtn.addEventListener("click", doRegister);
-  (async function init() {
-    try {
-      const r = await fetch("/api/auth/status");
-      const { registered } = await r.json();
-      if (registered) { hint.textContent = "Use your passkey to continue."; loginBtn.hidden = false; }
-      else { hint.textContent = "No passkey registered yet. Register this device to enable login."; regBtn.hidden = false; }
-    } catch (e) { hint.textContent = "Could not reach server."; showError(String(e)); }
-  })();
+  const err = new URLSearchParams(window.location.search).get("error");
+  if (err) { errEl.textContent = err; errEl.hidden = false; }
+  const btn = document.getElementById("login-btn");
+  btn.addEventListener("click", function() {
+    btn.disabled = true; btn.textContent = "Redirecting...";
+    window.location.href = "/api/auth/login/start";
+  });
 })();
 </script>
 </body>

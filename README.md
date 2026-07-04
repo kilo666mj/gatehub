@@ -20,26 +20,35 @@ The service has two HTTP surfaces:
 
 ## Admin Authentication
 
-The admin surface requires a WebAuthn passkey by default (`--admin-auth
-webauthn`). Because WebAuthn only works in a secure context, serve the admin UI
-over `https://` (a reverse proxy) or reach it as `http://127.0.0.1` / `localhost`
-over an SSH tunnel. The relying-party ID and origin must match that hostname:
+The admin surface authenticates through **OpenID Connect** by default
+(`--admin-auth oidc`), acting as a relying party against your provider (e.g.
+Pocket ID). Register an OIDC client on the provider whose redirect URL points at
+this app's `/api/auth/callback`, then run:
 
 ```sh
 go run . --db ./gatehub.sqlite \
   --admin-listen 127.0.0.1:8081 \
-  --admin-webauthn-rpid gatehub.example.com \
-  --admin-webauthn-origin https://gatehub.example.com
+  --admin-oidc-issuer https://pocket-id.example.com \
+  --admin-oidc-client-id gatehub \
+  --admin-oidc-redirect-url https://gatehub.example.com/api/auth/callback \
+  --admin-oidc-allowed-emails you@example.com
+# client secret via env (kept out of argv):
+export GATEHUB_ADMIN_OIDC_CLIENT_SECRET=...
 ```
 
-The first browser to reach `/login` with no credential enrolled can register a
-passkey; once one exists, further enrollment requires an authenticated session.
-Credentials and sessions live in the same SQLite database. Session lifetime is
-`--admin-session-max-age` seconds (default 8h; `0` disables expiry).
+Serve the admin UI over `https://` (a reverse proxy) or reach it as
+`http://127.0.0.1` / `localhost` over an SSH tunnel; the redirect URL must match
+the hostname the browser uses. `/login` shows a single "Sign in with Pocket ID"
+button that starts the authorization-code + PKCE flow. On return, the verified
+identity is checked against the optional `--admin-oidc-allowed-{subjects,emails,groups}`
+allowlists before a session is issued. Sessions live in the same SQLite database;
+lifetime is `--admin-session-max-age` seconds (default 8h; `0` disables expiry).
+The OIDC relying-party flow is provided by
+[`github.com/kilo666mj/oidcrp`](https://github.com/kilo666mj/oidcrp).
 
 For localhost-only development you can disable auth with `--admin-auth none`.
-The process refuses to start a WebAuthn admin listener without an RP ID and
-origin, so a misconfiguration cannot silently expose the approval API.
+The process refuses to start an OIDC admin listener without an issuer, client ID,
+and redirect URL, so a misconfiguration cannot silently expose the approval API.
 
 Client certificates are used as node identity. A node must be registered in
 `gatehub` before it can sync, and its configured `allowed_cert_name`
@@ -52,7 +61,7 @@ go run . --db ./gatehub.sqlite --admin-listen 127.0.0.1:8081 --admin-auth none
 ```
 
 Open `http://127.0.0.1:8081` from an internal network or over a tunnel.
-`--admin-auth none` disables passkey auth and is for localhost development only;
+`--admin-auth none` disables OIDC auth and is for localhost development only;
 see [Admin Authentication](#admin-authentication) for the production setup.
 
 ## Run Public mTLS Sync

@@ -5,98 +5,71 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/kilo666mj/oidcrp"
 )
 
 const (
-	authModeWebAuthn = "webauthn"
-	authModeNone     = "none"
+	authModeOIDC = "oidc"
+	authModeNone = "none"
 
 	sessionCookieName           = "gatehub_session"
-	loginChallengeCookieName    = "gatehub_login_challenge"
-	registerChallengeCookieName = "gatehub_register_challenge"
+	oidcStateCookieName         = "gatehub_oidc"
 	nonExpiringSessionCookieAge = 10 * 365 * 24 * 60 * 60
-	// WebAuthnID is fixed: gatehub is a single-operator control plane.
-	webAuthnUserID = "gatehub-admin"
 )
 
-// AuthService gates the admin surface with WebAuthn (passkey) login and
-// server-side sessions. It shares the store's SQLite database. When the mode is
-// authModeNone it is a pass-through (intended for localhost development only).
+// AuthService gates the admin surface with OpenID Connect (e.g. Pocket ID) login
+// and server-side sessions. It shares the store's SQLite database and delegates
+// the browser OIDC flow to the shared oidcrp module, implementing its
+// SessionManager for durable sessions. When the mode is authModeNone it is a
+// pass-through (intended for localhost development only).
 type AuthService struct {
 	mode          string
-	userName      string
-	origin        string
 	sessionMaxAge int
 
-	db       *sql.DB
-	webauthn *webauthn.WebAuthn
-
-	mu         sync.Mutex
-	challenges map[string]challengeEntry
-}
-
-type challengeEntry struct {
-	Session webauthn.SessionData
-	Expires time.Time
-}
-
-type webAuthnUser struct {
-	name        string
-	credentials []webauthn.Credential
+	db   *sql.DB
+	oidc *oidcrp.Service
 }
 
 func newAuthService(cfg config, db *sql.DB) (*AuthService, error) {
 	svc := &AuthService{
 		mode:          cfg.AdminAuth,
-		userName:      firstNonEmpty(cfg.AdminUserName, "gatehub admin"),
-		origin:        cfg.AdminOrigin,
 		sessionMaxAge: cfg.AdminSessionMaxAge,
-		challenges:    map[string]challengeEntry{},
 	}
-	if cfg.AdminAuth != authModeWebAuthn {
+	svc.oidc = oidcrp.New(oidcrp.Config{
+		Issuer:          cfg.AdminOIDCIssuer,
+		ClientID:        cfg.AdminOIDCClientID,
+		ClientSecret:    cfg.AdminOIDCClientSecret,
+		RedirectURL:     cfg.AdminOIDCRedirectURL,
+		Scopes:          splitList(cfg.AdminOIDCScopes),
+		AllowedSubjects: splitList(cfg.AdminOIDCAllowedSubjects),
+		AllowedEmails:   splitList(cfg.AdminOIDCAllowedEmails),
+		AllowedGroups:   splitList(cfg.AdminOIDCAllowedGroups),
+		StateCookieName: oidcStateCookieName,
+		LoginPath:       "/login",
+		SuccessPath:     "/",
+		APIPrefixes:     []string{"/api/"},
+	}, svc)
+	if cfg.AdminAuth != authModeOIDC {
 		return svc, nil
 	}
 	svc.db = db
 	if err := svc.initDB(); err != nil {
 		return nil, err
 	}
-	w, err := webauthn.New(&webauthn.Config{
-		RPID:          cfg.AdminRPID,
-		RPDisplayName: firstNonEmpty(cfg.AdminRPName, "gatehub"),
-		RPOrigins:     []string{cfg.AdminOrigin},
-		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			UserVerification: protocol.VerificationRequired,
-			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("configure webauthn: %w", err)
-	}
-	svc.webauthn = w
 	return svc, nil
 }
 
 func (a *AuthService) enabled() bool {
-	return a.mode == authModeWebAuthn && a.webauthn != nil
+	return a.mode == authModeOIDC && a.db != nil && a.oidc.Enabled()
 }
 
 func (a *AuthService) initDB() error {
 	_, err := a.db.Exec(`
-CREATE TABLE IF NOT EXISTS webauthn_credential (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	credential_id BLOB NOT NULL UNIQUE,
-	credential_json BLOB NOT NULL,
-	created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS app_session (
 	token TEXT PRIMARY KEY,
 	csrf_token TEXT NOT NULL DEFAULT '',
@@ -111,6 +84,30 @@ CREATE TABLE IF NOT EXISTS app_session (
 	}
 	return nil
 }
+
+// ── oidcrp.SessionManager ───────────────────────────────────────────────────
+
+// Valid reports whether the request carries a live session.
+func (a *AuthService) Valid(r *http.Request) bool { return a.validRequestSession(r) }
+
+// Issue mints a local session after a verified OIDC login. gatehub is a
+// single-operator control plane, so the identity is gated by the allowlist in
+// oidcrp and not stored per-session.
+func (a *AuthService) Issue(w http.ResponseWriter, _ *http.Request, _ oidcrp.Identity) error {
+	return a.issueSession(w)
+}
+
+// Clear deletes the current session and expires its cookie.
+func (a *AuthService) Clear(w http.ResponseWriter, r *http.Request) {
+	if a.db != nil {
+		if cookie, err := r.Cookie(sessionCookieName); err == nil {
+			_, _ = a.db.Exec(`DELETE FROM app_session WHERE token = ?`, cookie.Value)
+		}
+	}
+	a.clearCookie(w, sessionCookieName, "/")
+}
+
+// ── HTTP handlers ───────────────────────────────────────────────────────────
 
 // require wraps an admin handler, enforcing a valid session. GET page requests
 // are redirected to /login; API and non-GET requests get a 401.
@@ -147,294 +144,25 @@ func (a *AuthService) loginPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *AuthService) status(w http.ResponseWriter, r *http.Request) {
 	if !a.enabled() {
-		authJSON(w, map[string]bool{"registered": false, "authenticated": true})
+		authJSON(w, map[string]bool{"authenticated": true})
 		return
 	}
-	registered, err := a.hasCredential()
-	if err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	authJSON(w, map[string]bool{
-		"registered":    registered,
-		"authenticated": a.validRequestSession(r),
-	})
+	authJSON(w, map[string]bool{"authenticated": a.validRequestSession(r)})
 }
 
-func (a *AuthService) registerBegin(w http.ResponseWriter, r *http.Request) {
-	if !a.enabled() {
-		http.NotFound(w, r)
-		return
-	}
-	// First-time setup is open; once a credential exists, only an authenticated
-	// operator may enroll additional devices.
-	if !a.validRequestSession(r) {
-		registered, err := a.hasCredential()
-		if err != nil {
-			authError(w, err, http.StatusInternalServerError)
-			return
-		}
-		if registered {
-			authError(w, errors.New("registration is closed - a credential already exists"), http.StatusForbidden)
-			return
-		}
-	}
-	user, err := a.loadUser()
-	if err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	creation, session, err := a.webauthn.BeginRegistration(user, webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementPreferred))
-	if err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	if err := a.storeChallenge(w, registerChallengeCookieName, "register", *session); err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	authJSON(w, creation)
-}
-
-func (a *AuthService) registerComplete(w http.ResponseWriter, r *http.Request) {
-	if !a.enabled() {
-		http.NotFound(w, r)
-		return
-	}
-	user, err := a.loadUser()
-	if err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	requireFirstCredential := !a.validRequestSession(r)
-	if requireFirstCredential {
-		registered, err := a.hasCredential()
-		if err != nil {
-			authError(w, err, http.StatusInternalServerError)
-			return
-		}
-		if registered {
-			authError(w, errors.New("registration is closed - a credential already exists"), http.StatusForbidden)
-			return
-		}
-	}
-	session, err := a.popChallenge(w, r, registerChallengeCookieName, "register")
-	if err != nil {
-		authError(w, err, http.StatusBadRequest)
-		return
-	}
-	credential, err := a.webauthn.FinishRegistration(user, session, r)
-	if err != nil {
-		authError(w, fmt.Errorf("registration failed: %w", err), http.StatusBadRequest)
-		return
-	}
-	if err := a.saveCredential(*credential, requireFirstCredential); err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	if err := a.issueSession(w); err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	authJSON(w, map[string]string{"status": "registered"})
-}
-
-func (a *AuthService) loginBegin(w http.ResponseWriter, r *http.Request) {
-	if !a.enabled() {
-		http.NotFound(w, r)
-		return
-	}
-	user, err := a.loadUser()
-	if err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	if len(user.credentials) == 0 {
-		authError(w, errors.New("no credentials registered"), http.StatusNotFound)
-		return
-	}
-	assertion, session, err := a.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
-	if err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	if err := a.storeChallenge(w, loginChallengeCookieName, "login", *session); err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	authJSON(w, assertion)
-}
-
-func (a *AuthService) loginComplete(w http.ResponseWriter, r *http.Request) {
-	if !a.enabled() {
-		http.NotFound(w, r)
-		return
-	}
-	user, err := a.loadUser()
-	if err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	session, err := a.popChallenge(w, r, loginChallengeCookieName, "login")
-	if err != nil {
-		authError(w, err, http.StatusBadRequest)
-		return
-	}
-	credential, err := a.webauthn.FinishLogin(user, session, r)
-	if err != nil {
-		authError(w, fmt.Errorf("authentication failed: %w", err), http.StatusBadRequest)
-		return
-	}
-	if err := a.saveCredential(*credential, false); err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	if err := a.issueSession(w); err != nil {
-		authError(w, err, http.StatusInternalServerError)
-		return
-	}
-	authJSON(w, map[string]string{"status": "authenticated"})
-}
+// loginStart and callback delegate the browser OIDC flow to oidcrp.
+func (a *AuthService) loginStart(w http.ResponseWriter, r *http.Request) { a.oidc.LoginStart(w, r) }
+func (a *AuthService) callback(w http.ResponseWriter, r *http.Request)   { a.oidc.Callback(w, r) }
 
 func (a *AuthService) logout(w http.ResponseWriter, r *http.Request) {
 	if !a.requireCSRF(w, r) {
 		return
 	}
-	if a.db != nil {
-		if cookie, err := r.Cookie(sessionCookieName); err == nil {
-			_, _ = a.db.Exec(`DELETE FROM app_session WHERE token = ?`, cookie.Value)
-		}
-	}
-	a.clearCookie(w, sessionCookieName, "/")
+	a.Clear(w, r)
 	authJSON(w, map[string]string{"status": "logged out"})
 }
 
-func (a *AuthService) storeChallenge(w http.ResponseWriter, cookieName, prefix string, session webauthn.SessionData) error {
-	id, err := randomHex(32)
-	if err != nil {
-		return err
-	}
-	key := prefix + ":" + id
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	now := time.Now()
-	for k, entry := range a.challenges {
-		if entry.Expires.Before(now) {
-			delete(a.challenges, k)
-		}
-	}
-	a.challenges[key] = challengeEntry{Session: session, Expires: now.Add(120 * time.Second)}
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookieName,
-		Value:    id,
-		Path:     "/api/auth/",
-		MaxAge:   120,
-		HttpOnly: true,
-		Secure:   strings.HasPrefix(a.origin, "https://"),
-		SameSite: http.SameSiteStrictMode,
-	})
-	return nil
-}
-
-func (a *AuthService) popChallenge(w http.ResponseWriter, r *http.Request, cookieName, prefix string) (webauthn.SessionData, error) {
-	cookie, err := r.Cookie(cookieName)
-	if err != nil || cookie.Value == "" {
-		return webauthn.SessionData{}, errors.New("challenge expired or not found - try again")
-	}
-	key := prefix + ":" + cookie.Value
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	entry, ok := a.challenges[key]
-	if !ok || entry.Expires.Before(time.Now()) {
-		return webauthn.SessionData{}, errors.New("challenge expired or not found - try again")
-	}
-	delete(a.challenges, key)
-	a.clearCookie(w, cookieName, "/api/auth/")
-	return entry.Session, nil
-}
-
-func (a *AuthService) clearCookie(w http.ResponseWriter, name, path string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     name,
-		Value:    "",
-		Path:     path,
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   strings.HasPrefix(a.origin, "https://"),
-		SameSite: http.SameSiteStrictMode,
-	})
-}
-
-func (a *AuthService) loadUser() (*webAuthnUser, error) {
-	credentials, err := a.loadCredentials()
-	if err != nil {
-		return nil, err
-	}
-	return &webAuthnUser{name: a.userName, credentials: credentials}, nil
-}
-
-func (a *AuthService) loadCredentials() ([]webauthn.Credential, error) {
-	rows, err := a.db.Query(`SELECT credential_json FROM webauthn_credential ORDER BY id`)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	defer rows.Close()
-	var credentials []webauthn.Credential
-	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
-			return nil, err
-		}
-		var credential webauthn.Credential
-		if err := json.Unmarshal(data, &credential); err != nil {
-			return nil, fmt.Errorf("decode credential: %w", err)
-		}
-		credentials = append(credentials, credential)
-	}
-	return credentials, rows.Err()
-}
-
-func (a *AuthService) saveCredential(credential webauthn.Credential, requireFirstCredential bool) error {
-	data, err := json.Marshal(credential)
-	if err != nil {
-		return fmt.Errorf("encode credential: %w", err)
-	}
-	if requireFirstCredential {
-		res, err := a.db.Exec(`
-INSERT INTO webauthn_credential (credential_id, credential_json, created_at)
-SELECT ?, ?, ?
-WHERE NOT EXISTS (SELECT 1 FROM webauthn_credential)`,
-			credential.ID, data, nowString())
-		if err != nil {
-			return fmt.Errorf("save first credential: %w", err)
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("save first credential: %w", err)
-		}
-		if affected == 0 {
-			return errors.New("registration is closed - a credential already exists")
-		}
-		return nil
-	}
-	_, err = a.db.Exec(`
-INSERT INTO webauthn_credential (credential_id, credential_json, created_at)
-VALUES (?, ?, ?)
-ON CONFLICT(credential_id) DO UPDATE SET credential_json = excluded.credential_json`,
-		credential.ID, data, nowString())
-	if err != nil {
-		return fmt.Errorf("save credential: %w", err)
-	}
-	return nil
-}
-
-func (a *AuthService) hasCredential() (bool, error) {
-	var count int
-	if err := a.db.QueryRow(`SELECT COUNT(*) FROM webauthn_credential`).Scan(&count); err != nil {
-		return false, fmt.Errorf("check credentials: %w", err)
-	}
-	return count > 0, nil
-}
+// ── Sessions ────────────────────────────────────────────────────────────────
 
 func (a *AuthService) issueSession(w http.ResponseWriter) error {
 	token, err := randomHex(32)
@@ -461,18 +189,12 @@ func (a *AuthService) issueSession(w http.ResponseWriter) error {
 		Path:     "/",
 		MaxAge:   cookieMaxAge,
 		HttpOnly: true,
-		Secure:   strings.HasPrefix(a.origin, "https://"),
-		SameSite: http.SameSiteStrictMode,
+		Secure:   a.oidc.SecureCookies(),
+		// Lax (not Strict) so the cookie survives the top-level redirect back
+		// from the identity provider. Cross-site POSTs are still gated by CSRF.
+		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
-}
-
-func randomHex(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 func (a *AuthService) validRequestSession(r *http.Request) bool {
@@ -498,6 +220,20 @@ func (a *AuthService) validRequestSession(r *http.Request) bool {
 	}
 	return true
 }
+
+func (a *AuthService) clearCookie(w http.ResponseWriter, name, path string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     path,
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   a.oidc.SecureCookies(),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// ── CSRF ────────────────────────────────────────────────────────────────────
 
 func (a *AuthService) csrfToken(r *http.Request) string {
 	if !a.enabled() {
@@ -548,11 +284,25 @@ func constantTimeStringEqual(a, b string) int {
 	return 0
 }
 
-func (u *webAuthnUser) WebAuthnID() []byte          { return []byte(webAuthnUserID) }
-func (u *webAuthnUser) WebAuthnName() string        { return u.name }
-func (u *webAuthnUser) WebAuthnDisplayName() string { return u.name }
-func (u *webAuthnUser) WebAuthnCredentials() []webauthn.Credential {
-	return u.credentials
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// splitList parses a comma-separated flag value into a trimmed, non-empty slice.
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func authJSON(w http.ResponseWriter, value any) {
@@ -560,10 +310,4 @@ func authJSON(w http.ResponseWriter, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
-}
-
-func authError(w http.ResponseWriter, err error, status int) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
 }

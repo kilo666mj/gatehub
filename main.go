@@ -52,20 +52,24 @@ const (
 )
 
 type config struct {
-	DBPath             string
-	AdminListen        string
-	PublicListen       string
-	PublicCert         string
-	PublicKey          string
-	ClientCA           string
-	ClientCRL          string
-	PublicAuth         string
-	AdminAuth          string
-	AdminRPID          string
-	AdminOrigin        string
-	AdminRPName        string
-	AdminUserName      string
-	AdminSessionMaxAge int
+	DBPath                   string
+	AdminListen              string
+	PublicListen             string
+	PublicCert               string
+	PublicKey                string
+	ClientCA                 string
+	ClientCRL                string
+	PublicAuth               string
+	AdminAuth                string
+	AdminOIDCIssuer          string
+	AdminOIDCClientID        string
+	AdminOIDCClientSecret    string
+	AdminOIDCRedirectURL     string
+	AdminOIDCScopes          string
+	AdminOIDCAllowedSubjects string
+	AdminOIDCAllowedEmails   string
+	AdminOIDCAllowedGroups   string
+	AdminSessionMaxAge       int
 }
 
 type app struct {
@@ -139,13 +143,20 @@ func parseConfig() config {
 	flag.StringVar(&cfg.ClientCA, "client-ca", "", "CA certificate used to verify node client certificates")
 	flag.StringVar(&cfg.ClientCRL, "client-crl", "", "optional PEM CRL for revoked node client certificates")
 	flag.StringVar(&cfg.PublicAuth, "public-auth", "mtls", "public sync auth mode: mtls, token, or both")
-	flag.StringVar(&cfg.AdminAuth, "admin-auth", authModeWebAuthn, "admin auth mode: webauthn or none (none is for localhost dev only)")
-	flag.StringVar(&cfg.AdminRPID, "admin-webauthn-rpid", "", "WebAuthn relying party ID (admin hostname, e.g. gatehub.example.com)")
-	flag.StringVar(&cfg.AdminOrigin, "admin-webauthn-origin", "", "WebAuthn origin for the admin UI (e.g. https://gatehub.example.com)")
-	flag.StringVar(&cfg.AdminRPName, "admin-webauthn-rpname", "gatehub", "WebAuthn relying party display name")
-	flag.StringVar(&cfg.AdminUserName, "admin-webauthn-username", "gatehub admin", "WebAuthn user display name")
+	flag.StringVar(&cfg.AdminAuth, "admin-auth", authModeOIDC, "admin auth mode: oidc or none (none is for localhost dev only)")
+	flag.StringVar(&cfg.AdminOIDCIssuer, "admin-oidc-issuer", "", "OIDC issuer URL (e.g. https://pocket-id.example.com)")
+	flag.StringVar(&cfg.AdminOIDCClientID, "admin-oidc-client-id", "", "OIDC client ID")
+	flag.StringVar(&cfg.AdminOIDCClientSecret, "admin-oidc-client-secret", "", "OIDC client secret (or set GATEHUB_ADMIN_OIDC_CLIENT_SECRET to keep it out of argv)")
+	flag.StringVar(&cfg.AdminOIDCRedirectURL, "admin-oidc-redirect-url", "", "OIDC redirect URL (e.g. https://gatehub.example.com/api/auth/callback)")
+	flag.StringVar(&cfg.AdminOIDCScopes, "admin-oidc-scopes", "openid,profile,email", "comma-separated OIDC scopes")
+	flag.StringVar(&cfg.AdminOIDCAllowedSubjects, "admin-oidc-allowed-subjects", "", "comma-separated allowlist of subject (sub) claims; empty allows any authenticated identity")
+	flag.StringVar(&cfg.AdminOIDCAllowedEmails, "admin-oidc-allowed-emails", "", "comma-separated allowlist of email claims")
+	flag.StringVar(&cfg.AdminOIDCAllowedGroups, "admin-oidc-allowed-groups", "", "comma-separated allowlist of group claims")
 	flag.IntVar(&cfg.AdminSessionMaxAge, "admin-session-max-age", 28800, "admin session lifetime in seconds; 0 means no expiry")
 	flag.Parse()
+	if cfg.AdminOIDCClientSecret == "" {
+		cfg.AdminOIDCClientSecret = os.Getenv("GATEHUB_ADMIN_OIDC_CLIENT_SECRET")
+	}
 	switch cfg.PublicAuth {
 	case "mtls", "token", "both":
 	default:
@@ -155,16 +166,16 @@ func parseConfig() config {
 	// unit) as the secure default rather than an error, so a stale env file
 	// fails closed with an actionable message instead of "invalid mode".
 	if cfg.AdminAuth == "" {
-		cfg.AdminAuth = authModeWebAuthn
+		cfg.AdminAuth = authModeOIDC
 	}
 	switch cfg.AdminAuth {
-	case authModeWebAuthn:
-		if cfg.AdminListen != "" && (cfg.AdminRPID == "" || cfg.AdminOrigin == "") {
-			log.Fatalf("admin auth mode %q requires --admin-webauthn-rpid and --admin-webauthn-origin (use --admin-auth none only for localhost dev)", cfg.AdminAuth)
+	case authModeOIDC:
+		if cfg.AdminListen != "" && (cfg.AdminOIDCIssuer == "" || cfg.AdminOIDCClientID == "" || cfg.AdminOIDCRedirectURL == "") {
+			log.Fatalf("admin auth mode %q requires --admin-oidc-issuer, --admin-oidc-client-id and --admin-oidc-redirect-url (use --admin-auth none only for localhost dev)", cfg.AdminAuth)
 		}
 	case authModeNone:
 	default:
-		log.Fatalf("invalid --admin-auth %q (want webauthn or none)", cfg.AdminAuth)
+		log.Fatalf("invalid --admin-auth %q (want oidc or none)", cfg.AdminAuth)
 	}
 	return cfg
 }
@@ -664,10 +675,8 @@ func (a *app) adminMux() http.Handler {
 	// Authentication endpoints (unauthenticated by design).
 	mux.HandleFunc("GET /login", a.auth.loginPage)
 	mux.HandleFunc("GET /api/auth/status", a.auth.status)
-	mux.HandleFunc("POST /api/auth/register/begin", a.auth.registerBegin)
-	mux.HandleFunc("POST /api/auth/register/complete", a.auth.registerComplete)
-	mux.HandleFunc("POST /api/auth/login/begin", a.auth.loginBegin)
-	mux.HandleFunc("POST /api/auth/login/complete", a.auth.loginComplete)
+	mux.HandleFunc("GET /api/auth/login/start", a.auth.loginStart)
+	mux.HandleFunc("GET /api/auth/callback", a.auth.callback)
 	mux.HandleFunc("POST /api/auth/logout", a.auth.logout)
 
 	// Gated admin surface.
