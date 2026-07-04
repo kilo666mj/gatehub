@@ -1,0 +1,15 @@
+---
+# Copy this file to infra.yml (same directory, gitignored) and fill in real values.
+# The filename must match the inventory host name (infra) for Ansible to auto-load it.
+#
+# host_vars outranks group_vars, so anything set here overrides the committed
+# example values in group_vars/gatehub/vars.yml. If infra.yml does not exist, the
+# playbook still runs using those vars.yml examples.
+#
+# Keys you'll typically want to override:
+#   gatehub_admin_auth: oidc
+#   gatehub_admin_oidc_issuer: https://your-pocket-id.example.com
+#   gatehub_admin_oidc_client_id: gatehub
+#   gatehub_admin_oidc_client_secret: "your-real-secret"
+#   gatehub_admin_oidc_redirect_url: https://gatehub.example.com/api/auth/callback
+#   gatehub_admin_oidc_allowed_emails: "you@example.com"

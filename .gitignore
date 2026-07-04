@@ -10,5 +10,6 @@ gatehub-*
 .DS_Store
 *.retry
 
-# gatehub is a public repo — real OIDC secret/hostnames stay out of git
-ansible/group_vars/gatehub/secret.yml
+# gatehub is a public repo — real OIDC secret/hostnames stay out of git.
+# host_vars/infra.yml holds the real values; the committed .example is the template.
+ansible/host_vars/infra.yml

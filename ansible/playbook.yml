@@ -3,6 +3,10 @@
   hosts: gatehub
   become: true
 
+  # Real secrets/hostnames live in ansible/host_vars/infra.yml (gitignored). host_vars
+  # outranks group_vars, so those values override the committed example values in
+  # group_vars/gatehub/vars.yml. The file is optional: if absent (e.g. a fresh clone),
+  # host_vars auto-loading is silently skipped and the vars.yml examples apply.
   tasks:
     - name: Build gatehub locally
       ansible.builtin.command:
