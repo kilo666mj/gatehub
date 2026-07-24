@@ -575,12 +575,29 @@ func (s *Store) CreateDecision(d Decision) error {
 		d.ScopeType, d.ScopeID, d.Kind, d.Fingerprint, d.Status, d.Label, now, d.Actor); err != nil {
 		return err
 	}
-	if d.ScopeType == "instance" {
+	switch d.ScopeType {
+	case "instance":
 		if _, err := tx.Exec(`
 			UPDATE fingerprints
 			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
 			WHERE node_id = ? AND fingerprint = ?`,
 			d.Status, d.Label, d.Label, now, d.ScopeID, d.Fingerprint); err != nil {
+			return err
+		}
+	case "kind":
+		if _, err := tx.Exec(`
+			UPDATE fingerprints
+			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
+			WHERE kind = ? AND fingerprint = ?`,
+			d.Status, d.Label, d.Label, now, d.ScopeID, d.Fingerprint); err != nil {
+			return err
+		}
+	case "global":
+		if _, err := tx.Exec(`
+			UPDATE fingerprints
+			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
+			WHERE fingerprint = ?`,
+			d.Status, d.Label, d.Label, now, d.Fingerprint); err != nil {
 			return err
 		}
 	}
@@ -958,9 +975,14 @@ func (a *app) handleAdminDecision(w http.ResponseWriter, r *http.Request) {
 	if !a.auth.requireCSRF(w, r) {
 		return
 	}
+	scopeType := firstNonEmpty(r.FormValue("scope_type"), "instance")
+	scopeID := r.FormValue("scope_id")
+	if scopeType == "global" {
+		scopeID = ""
+	}
 	d := Decision{
-		ScopeType:   firstNonEmpty(r.FormValue("scope_type"), "instance"),
-		ScopeID:     r.FormValue("scope_id"),
+		ScopeType:   scopeType,
+		ScopeID:     scopeID,
 		Kind:        r.FormValue("kind"),
 		Fingerprint: r.FormValue("fingerprint"),
 		Status:      r.FormValue("status"),
@@ -1452,11 +1474,14 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
               <td>
                 <form class="inline" method="post" action="/decisions">
                   <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                  <input type="hidden" name="scope_type" value="instance">
                   <input type="hidden" name="scope_id" value="{{.NodeID}}">
                   <input type="hidden" name="kind" value="{{.Kind}}">
                   <input type="hidden" name="fingerprint" value="{{.Fingerprint}}">
                   <select name="status">{{range $.Statuses}}<option>{{.}}</option>{{end}}</select>
+                  <select name="scope_type" aria-label="Decision scope">
+                    <option value="instance">this node</option>
+                    <option value="global">all nodes</option>
+                  </select>
                   <input name="label" value="{{.Label}}" placeholder="label">
                   <button>Apply</button>
                 </form>
@@ -1480,6 +1505,14 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
         window.location.href = "/login";
       });
     }
+    document.querySelectorAll("form.inline").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        const scope = form.querySelector("[name='scope_type']");
+        if (scope?.value === "global" && !window.confirm("Apply this decision to every node with this fingerprint?")) {
+          event.preventDefault();
+        }
+      });
+    });
     const statusRank = { approved: 0, active: 0, blocked: 1, pending: 2, disabled: 2, revoked: 3 };
     function cellValue(row, index, type) {
       const cell = row.children[index];

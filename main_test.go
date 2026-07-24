@@ -3,6 +3,8 @@ package main
 import (
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,6 +100,86 @@ func TestObservationDoesNotOverrideDecision(t *testing.T) {
 	}
 	if len(fps) != 1 || fps[0].Status != decisionBlocked {
 		t.Fatalf("status after resync = %+v, want blocked (decision preserved)", fps)
+	}
+}
+
+func TestGlobalDecisionUpdatesMatchingFingerprintsAndPolicies(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	nodes := []Node{
+		{ID: "mail-tls", Kind: "tlsgate", Host: "mail-gateway", AllowedCertName: "mail-gateway", Status: statusActive},
+		{ID: "shell-ssh", Kind: "sshgate", Host: "shell-gateway", AllowedCertName: "shell-gateway", Status: statusActive},
+	}
+	for _, node := range nodes {
+		if err := store.UpsertNode(node); err != nil {
+			t.Fatalf("UpsertNode(%s): %v", node.ID, err)
+		}
+		if err := store.UpsertObservations(node, []Fingerprint{{Fingerprint: "abc123"}}); err != nil {
+			t.Fatalf("UpsertObservations(%s): %v", node.ID, err)
+		}
+	}
+
+	if err := store.CreateDecision(Decision{
+		ScopeType:   "global",
+		Fingerprint: "abc123",
+		Status:      decisionApproved,
+		Label:       "Shared key",
+		Actor:       "test",
+	}); err != nil {
+		t.Fatalf("CreateDecision: %v", err)
+	}
+
+	fps, err := store.Fingerprints("")
+	if err != nil {
+		t.Fatalf("Fingerprints: %v", err)
+	}
+	if len(fps) != len(nodes) {
+		t.Fatalf("got %d fingerprints, want %d", len(fps), len(nodes))
+	}
+	for _, fp := range fps {
+		if fp.Status != decisionApproved || fp.Label != "Shared key" {
+			t.Errorf("fingerprint for %s = %+v, want globally approved and labeled", fp.NodeID, fp)
+		}
+	}
+	for _, node := range nodes {
+		decisions, _, err := store.PolicyForNode(node, "")
+		if err != nil {
+			t.Fatalf("PolicyForNode(%s): %v", node.ID, err)
+		}
+		if len(decisions) != 1 || decisions[0].ScopeType != "global" || decisions[0].Status != decisionApproved {
+			t.Errorf("decisions for %s = %+v, want one global approval", node.ID, decisions)
+		}
+	}
+}
+
+func TestAdminGlobalDecisionClearsInstanceScopeID(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	a := app{store: store, auth: &AuthService{}}
+	req := httptest.NewRequest(http.MethodPost, "/decisions", strings.NewReader(
+		"scope_type=global&scope_id=mail-tls&kind=tlsgate&fingerprint=abc123&status=approved",
+	))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	a.handleAdminDecision(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /decisions = %d, want %d; body: %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+	}
+
+	decisions, _, err := store.PolicyForNode(Node{ID: "other", Kind: "sshgate"}, "")
+	if err != nil {
+		t.Fatalf("PolicyForNode: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].ScopeType != "global" || decisions[0].ScopeID != "" {
+		t.Fatalf("decisions = %+v, want normalized global scope", decisions)
 	}
 }
 
