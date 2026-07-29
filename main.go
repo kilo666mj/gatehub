@@ -290,6 +290,19 @@ type Fingerprint struct {
 	UpdatedAt   string         `json:"updated_at"`
 }
 
+type FingerprintGroup struct {
+	Fingerprint string
+	Status      string
+	Label       string
+	LabelsVary  bool
+	LastSeen    string
+	IPs         []string
+	Count       int
+	HostNames   []string
+	MoreHosts   int
+	Instances   []Fingerprint
+}
+
 type Decision struct {
 	ID          int64  `json:"id"`
 	ScopeType   string `json:"scope_type"`
@@ -883,31 +896,93 @@ func (a *app) handleAdminHome(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	sort.SliceStable(fps, func(i, j int) bool {
-		if fingerprintStatusRank(fps[i].Status) != fingerprintStatusRank(fps[j].Status) {
-			return fingerprintStatusRank(fps[i].Status) < fingerprintStatusRank(fps[j].Status)
-		}
-		return fps[i].LastSeen > fps[j].LastSeen
-	})
+	fingerprintGroups := groupFingerprints(fps)
 	data := struct {
-		Nodes        []Node
-		Fingerprints []Fingerprint
-		Statuses     []string
-		AuthEnabled  bool
-		CSRFToken    string
-	}{nodes, fps, []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
+		Nodes             []Node
+		FingerprintGroups []FingerprintGroup
+		ObservationCount  int
+		Statuses          []string
+		AuthEnabled       bool
+		CSRFToken         string
+	}{nodes, fingerprintGroups, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
 	if err := adminTemplate.Execute(w, data); err != nil {
 		log.Printf("render admin: %v", err)
 	}
 }
 
-func fingerprintStatusRank(status string) int {
+func groupFingerprints(fps []Fingerprint) []FingerprintGroup {
+	groupsByFingerprint := make(map[string]*FingerprintGroup)
+	var groups []*FingerprintGroup
+	for _, fp := range fps {
+		group := groupsByFingerprint[fp.Fingerprint]
+		if group == nil {
+			group = &FingerprintGroup{
+				Fingerprint: fp.Fingerprint,
+				Status:      fp.Status,
+				Label:       fp.Label,
+			}
+			groupsByFingerprint[fp.Fingerprint] = group
+			groups = append(groups, group)
+		}
+		group.Instances = append(group.Instances, fp)
+		group.Count += fp.Count
+		if fp.LastSeen > group.LastSeen {
+			group.LastSeen = fp.LastSeen
+		}
+		if groupedFingerprintStatusRank(fp.Status) < groupedFingerprintStatusRank(group.Status) {
+			group.Status = fp.Status
+		}
+		if len(group.Instances) > 1 && group.Label != fp.Label {
+			group.LabelsVary = true
+			group.Label = ""
+		}
+	}
+
+	result := make([]FingerprintGroup, 0, len(groups))
+	for _, group := range groups {
+		hostSet := make(map[string]struct{})
+		ipSet := make(map[string]struct{})
+		for _, fp := range group.Instances {
+			hostSet[fp.Host] = struct{}{}
+			for _, ip := range fp.IPs {
+				ipSet[ip] = struct{}{}
+			}
+		}
+		for host := range hostSet {
+			group.HostNames = append(group.HostNames, host)
+		}
+		for ip := range ipSet {
+			group.IPs = append(group.IPs, ip)
+		}
+		sort.Strings(group.HostNames)
+		sort.Strings(group.IPs)
+		if len(group.HostNames) > 3 {
+			group.MoreHosts = len(group.HostNames) - 3
+		}
+		sort.SliceStable(group.Instances, func(i, j int) bool {
+			if group.Instances[i].Host != group.Instances[j].Host {
+				return group.Instances[i].Host < group.Instances[j].Host
+			}
+			return group.Instances[i].NodeID < group.Instances[j].NodeID
+		})
+		result = append(result, *group)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if groupedFingerprintStatusRank(result[i].Status) != groupedFingerprintStatusRank(result[j].Status) {
+			return groupedFingerprintStatusRank(result[i].Status) < groupedFingerprintStatusRank(result[j].Status)
+		}
+		return result[i].LastSeen > result[j].LastSeen
+	})
+	return result
+}
+
+func groupedFingerprintStatusRank(status string) int {
 	switch status {
-	case decisionApproved:
-		return 0
 	case decisionBlocked:
-		return 1
+		return 0
 	case decisionPending:
+		return 1
+	case decisionApproved:
 		return 2
 	default:
 		return 3
@@ -1378,6 +1453,46 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     details.ip-list[open] summary::after { content: " -"; }
     .ip-preview { display: grid; gap: 4px; margin-top: 6px; }
     .ip-all { display: grid; gap: 4px; margin-top: 8px; max-height: 220px; overflow: auto; padding-right: 6px; }
+    details.host-list { min-width: 210px; }
+    details.host-list > summary {
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    details.host-list > summary::-webkit-details-marker { display: none; }
+    .host-chip {
+      display: inline-flex;
+      padding: 2px 7px;
+      border-radius: 999px;
+      color: #344541;
+      background: #edf3f2;
+      border: 1px solid #d5e2df;
+      font-size: 12px;
+      font-weight: 680;
+    }
+    .host-more { color: var(--teal); font-size: 12px; font-weight: 760; }
+    .host-instances {
+      display: grid;
+      gap: 9px;
+      margin-top: 10px;
+      min-width: 420px;
+    }
+    .host-instance {
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8faf9;
+    }
+    .host-instance-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 7px;
+    }
     .wrap { overflow-x: auto; }
     @media (max-width: 980px) {
       header { align-items: start; flex-direction: column; }
@@ -1447,18 +1562,45 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     <section>
       <div class="section-head">
         <h2>Fingerprints</h2>
-        <span class="section-count">{{len .Fingerprints}} observed</span>
+        <span class="section-count">{{len .FingerprintGroups}} signatures across {{.ObservationCount}} observations</span>
       </div>
       <div class="wrap">
         <table>
-          <thead><tr><th data-sort="text">Node</th><th data-sort="text">Fingerprint</th><th data-sort="status">Status</th><th data-sort="text">Label</th><th data-sort="text">Last Seen</th><th data-sort="number">IPs</th><th data-sort="number">Details</th><th>Decision</th></tr></thead>
+          <thead><tr><th data-sort="text">Fingerprint</th><th data-sort="number">Hosts</th><th data-sort="status">Status</th><th data-sort="text">Label</th><th data-sort="text">Last Seen</th><th data-sort="number">IPs</th><th data-sort="number">Count</th><th>Decision</th></tr></thead>
           <tbody>
-          {{range .Fingerprints}}
+          {{range .FingerprintGroups}}
             <tr>
-              <td data-value="{{.NodeID}}"><code>{{.NodeID}}</code><br><span class="muted">{{.Kind}} {{.Host}}</span></td>
               <td data-value="{{.Fingerprint}}"><code>{{.Fingerprint}}</code></td>
+              <td data-value="{{len .HostNames}}">
+                <details class="host-list">
+                  <summary>
+                    {{range $i, $host := .HostNames}}{{if lt $i 3}}<span class="host-chip">{{$host}}</span>{{end}}{{end}}
+                    {{if .MoreHosts}}<span class="host-more">+{{.MoreHosts}} more</span>{{end}}
+                  </summary>
+                  <div class="host-instances">
+                    {{range .Instances}}
+                      <div class="host-instance">
+                        <div class="host-instance-head">
+                          <span><strong>{{.Host}}</strong> <code>{{.NodeID}}</code> <span class="kind kind-{{.Kind}}">{{.Kind}}</span></span>
+                          <span class="badge status-{{.Status}}">{{.Status}}</span>
+                        </div>
+                        <form class="inline" method="post" action="/decisions">
+                          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                          <input type="hidden" name="scope_id" value="{{.NodeID}}">
+                          <input type="hidden" name="kind" value="{{.Kind}}">
+                          <input type="hidden" name="fingerprint" value="{{.Fingerprint}}">
+                          <input type="hidden" name="scope_type" value="instance">
+                          <select name="status" aria-label="Status for {{.Host}}">{{range $.Statuses}}<option>{{.}}</option>{{end}}</select>
+                          <input name="label" value="{{.Label}}" placeholder="label" aria-label="Label for {{.Host}}">
+                          <button>Apply to host</button>
+                        </form>
+                      </div>
+                    {{end}}
+                  </div>
+                </details>
+              </td>
               <td data-value="{{.Status}}"><span class="badge status-{{.Status}}">{{.Status}}</span></td>
-              <td data-value="{{.Label}}">{{.Label}}</td>
+              <td data-value="{{.Label}}">{{if .LabelsVary}}<span class="muted">varies by host</span>{{else if .Label}}{{.Label}}{{else}}<span class="muted">-</span>{{end}}</td>
               <td data-value="{{.LastSeen}}">{{.LastSeen}}</td>
               <td data-value="{{len .IPs}}">
                 {{if .IPs}}
@@ -1470,20 +1612,15 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
                   <span class="muted">-</span>
                 {{end}}
               </td>
-              <td data-value="{{.Count}}"><span class="muted">count</span> {{.Count}}</td>
+              <td data-value="{{.Count}}">{{.Count}}</td>
               <td>
                 <form class="inline" method="post" action="/decisions">
                   <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                  <input type="hidden" name="scope_id" value="{{.NodeID}}">
-                  <input type="hidden" name="kind" value="{{.Kind}}">
                   <input type="hidden" name="fingerprint" value="{{.Fingerprint}}">
                   <select name="status">{{range $.Statuses}}<option>{{.}}</option>{{end}}</select>
-                  <select name="scope_type" aria-label="Decision scope">
-                    <option value="instance">this node</option>
-                    <option value="global">all nodes</option>
-                  </select>
+                  <input type="hidden" name="scope_type" value="global">
                   <input name="label" value="{{.Label}}" placeholder="label">
-                  <button>Apply</button>
+                  <button>Apply to all hosts</button>
                 </form>
               </td>
             </tr>

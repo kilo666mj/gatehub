@@ -156,6 +156,68 @@ func TestGlobalDecisionUpdatesMatchingFingerprintsAndPolicies(t *testing.T) {
 	}
 }
 
+func TestGroupFingerprintsCollapsesHostsAndPreservesInstances(t *testing.T) {
+	groups := groupFingerprints([]Fingerprint{
+		{
+			NodeID:      "node-b",
+			Kind:        "sshgate",
+			Host:        "shell-b",
+			Fingerprint: "shared",
+			Status:      decisionApproved,
+			Label:       "workstation",
+			LastSeen:    "2026-07-01T10:00:00Z",
+			IPs:         []string{"203.0.113.10"},
+			Count:       2,
+		},
+		{
+			NodeID:      "node-a",
+			Kind:        "sshgate",
+			Host:        "shell-a",
+			Fingerprint: "shared",
+			Status:      decisionBlocked,
+			Label:       "unexpected",
+			LastSeen:    "2026-07-01T11:00:00Z",
+			IPs:         []string{"203.0.113.10", "203.0.113.11"},
+			Count:       3,
+		},
+		{
+			NodeID:      "node-c",
+			Kind:        "tlsgate",
+			Host:        "mail-a",
+			Fingerprint: "other",
+			Status:      decisionPending,
+			LastSeen:    "2026-07-01T09:00:00Z",
+			Count:       1,
+		},
+	})
+
+	if len(groups) != 2 {
+		t.Fatalf("got %d groups, want 2", len(groups))
+	}
+	shared := groups[0]
+	if shared.Fingerprint != "shared" {
+		t.Fatalf("first group fingerprint = %q, want shared (blocked sorts first)", shared.Fingerprint)
+	}
+	if shared.Status != decisionBlocked {
+		t.Fatalf("shared status = %q, want worst status blocked", shared.Status)
+	}
+	if shared.Label != "" {
+		t.Fatalf("shared label = %q, want empty for differing labels", shared.Label)
+	}
+	if !shared.LabelsVary {
+		t.Fatal("shared LabelsVary = false, want true for differing labels")
+	}
+	if shared.LastSeen != "2026-07-01T11:00:00Z" || shared.Count != 5 {
+		t.Fatalf("shared aggregates = last seen %q, count %d", shared.LastSeen, shared.Count)
+	}
+	if len(shared.HostNames) != 2 || shared.HostNames[0] != "shell-a" || shared.HostNames[1] != "shell-b" {
+		t.Fatalf("shared hosts = %v, want sorted unique hosts", shared.HostNames)
+	}
+	if len(shared.IPs) != 2 || len(shared.Instances) != 2 {
+		t.Fatalf("shared IPs/instances = %v/%d, want unique IPs and both instances", shared.IPs, len(shared.Instances))
+	}
+}
+
 func TestAdminGlobalDecisionClearsInstanceScopeID(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
