@@ -12,7 +12,11 @@ gatehub-*
 
 # gatehub is a public repo — real OIDC secret/hostnames stay out of git.
 # host_vars/infra.yml holds the real values; the committed .example is the template.
-ansible/host_vars/infra.yml
+# Every host_vars file carries real values for a real host. Ignore them all by
+# default rather than naming each one -- the .example templates are not matched,
+# since they do not end in .yml/.yaml.
+ansible/host_vars/*.yml
+ansible/host_vars/*.yaml
 
 # Real inventory (real host) stays local; inventory.example is the template
 ansible/inventory
