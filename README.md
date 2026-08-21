@@ -88,6 +88,19 @@ Do not proxy the admin listener publicly.
 
 ## Node Registration
 
+Nodes can be registered through the authenticated admin UI or locally with the
+administrative CLI. The CLI reads tokens from a file or standard input so they
+do not appear in process arguments or shell history:
+
+```sh
+gatehub register-node --db /var/lib/gatehub/gatehub.sqlite \
+  --id logs-central --kind log_watcher --host logwc \
+  --allowed-cert-name logs-central --token-file /run/secrets/log-watcher-token
+```
+
+Use `--token-file -` to read one newline-terminated token from standard input.
+The token is hashed before storage and is never printed.
+
 Create a node in the admin UI:
 
 ```text

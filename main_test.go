@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -419,6 +421,45 @@ func TestValidateNodeTokenRejectsWeakTokens(t *testing.T) {
 	}
 	if err := validateNodeToken(strings.Repeat("a", minNodeTokenLength)); err != nil {
 		t.Fatalf("validateNodeToken(strong) = %v", err)
+	}
+}
+
+func TestRegisterNodeReadsTokenFromStdinWithoutEchoingIt(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "gatehub.sqlite")
+	token := strings.Repeat("secret-token-", 4)
+	var stdout bytes.Buffer
+	err := registerNode([]string{
+		"--db", dbPath,
+		"--id", "logs-central",
+		"--kind", "log_watcher",
+		"--host", "logwc",
+		"--allowed-cert-name", "logs-central",
+		"--token-file", "-",
+	}, strings.NewReader(token+"\n"), &stdout)
+	if err != nil {
+		t.Fatalf("registerNode: %v", err)
+	}
+	if strings.Contains(stdout.String(), token) {
+		t.Fatal("command echoed node token")
+	}
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	node, err := store.Node("logs-central")
+	if err != nil {
+		t.Fatalf("Node: %v", err)
+	}
+	if node.Kind != "log_watcher" || node.TokenHash != hashToken(token) {
+		t.Fatalf("stored node = %#v", node)
+	}
+}
+
+func TestRegisterNodeRequiresTokenFile(t *testing.T) {
+	err := registerNode([]string{"--id", "logs-central"}, strings.NewReader(""), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--token-file is required") {
+		t.Fatalf("registerNode error = %v", err)
 	}
 }
 

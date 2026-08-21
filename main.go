@@ -82,6 +82,12 @@ type app struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "register-node" {
+		if err := registerNode(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	cfg := parseConfig()
 	store, err := NewStore(cfg.DBPath)
 	if err != nil {
@@ -142,6 +148,59 @@ func main() {
 	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func registerNode(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("register-node", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var dbPath, id, kind, host, allowedCertName, tokenFile string
+	fs.StringVar(&dbPath, "db", "gatehub.sqlite", "SQLite database path")
+	fs.StringVar(&id, "id", "", "node ID")
+	fs.StringVar(&kind, "kind", "", "node kind")
+	fs.StringVar(&host, "host", "", "node host")
+	fs.StringVar(&allowedCertName, "allowed-cert-name", "", "allowed client certificate name")
+	fs.StringVar(&tokenFile, "token-file", "", "token file, or - for standard input")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("register-node does not accept positional arguments")
+	}
+	if tokenFile == "" {
+		return errors.New("--token-file is required (use - for standard input)")
+	}
+	var tokenBytes []byte
+	var err error
+	if tokenFile == "-" {
+		tokenBytes, err = io.ReadAll(io.LimitReader(stdin, maxNodeTokenLength+2))
+	} else {
+		tokenBytes, err = os.ReadFile(tokenFile)
+	}
+	if err != nil {
+		return fmt.Errorf("read node token: %w", err)
+	}
+	token := strings.TrimSuffix(strings.TrimSuffix(string(tokenBytes), "\n"), "\r")
+	if err := validateNodeToken(token); err != nil {
+		return err
+	}
+	store, err := NewStore(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer store.Close()
+	node := Node{
+		ID:              strings.TrimSpace(id),
+		Kind:            strings.TrimSpace(kind),
+		Host:            strings.TrimSpace(host),
+		AllowedCertName: strings.TrimSpace(allowedCertName),
+		TokenHash:       hashToken(token),
+		Status:          statusActive,
+	}
+	if err := store.UpsertNode(node); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "registered node %s\n", node.ID)
+	return err
 }
 
 func parseConfig() config {
