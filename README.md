@@ -156,6 +156,9 @@ POST /v1/observations/batch?instance_id=mail-tls
       "last_seen": "2026-07-01T10:01:00Z",
       "ips": ["203.0.113.10"],
       "ports": [993],
+      "sightings": [
+        {"ip": "203.0.113.10", "port": 993, "last_seen": "2026-07-01T10:01:00Z"}
+      ],
       "count": 2,
       "metadata": {
         "sni": "mail.example.com",
@@ -166,6 +169,11 @@ POST /v1/observations/batch?instance_id=mail-tls
   ]
 }
 ```
+
+Timestamped sightings preserve the IP/port pairing needed for later event
+correlation. Gatehub retains them for eight days by default; configure
+`--sighting-retention` to change the bounded retention window. Aggregate
+fingerprint records and decisions are not removed by sighting cleanup.
 
 Policy pull:
 

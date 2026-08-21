@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStoreObservationDecisionPolicy(t *testing.T) {
@@ -28,10 +29,18 @@ func TestStoreObservationDecisionPolicy(t *testing.T) {
 		LastSeen:    "2026-07-01T10:01:00Z",
 		IPs:         []string{"203.0.113.10"},
 		Ports:       []int{993},
+		Sightings:   []Sighting{{IP: "203.0.113.10", Port: 993, LastSeen: "2026-07-01T10:01:00Z"}},
 		Count:       2,
 		Metadata:    map[string]any{"sni": "mail.example.com"},
 	}}); err != nil {
 		t.Fatalf("UpsertObservations: %v", err)
+	}
+	var sightings int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM fingerprint_sightings WHERE node_id = ? AND fingerprint = ?`, node.ID, "abc123").Scan(&sightings); err != nil {
+		t.Fatal(err)
+	}
+	if sightings != 1 {
+		t.Fatalf("sightings = %d, want 1", sightings)
 	}
 	if err := store.CreateDecision(Decision{
 		ScopeType:   "instance",
@@ -62,6 +71,41 @@ func TestStoreObservationDecisionPolicy(t *testing.T) {
 	}
 	if len(fps) != 1 || fps[0].Status != decisionApproved || fps[0].Label != "Alice iPhone" {
 		t.Fatalf("fingerprints = %+v, want locally updated approved fingerprint", fps)
+	}
+}
+
+func TestPruneSightingsBefore(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	node := Node{ID: "web-tls", Kind: "tlsgate", Host: "web", AllowedCertName: "web", Status: statusActive}
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertObservations(node, []Fingerprint{{
+		Fingerprint: "fp1",
+		Sightings: []Sighting{
+			{IP: "192.0.2.1", Port: 443, LastSeen: "2026-07-01T00:00:00Z"},
+			{IP: "192.0.2.2", Port: 443, LastSeen: "2026-08-01T00:00:00Z"},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.PruneSightingsBefore(time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+	var remaining int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM fingerprint_sightings`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining = %d, want 1", remaining)
 	}
 }
 

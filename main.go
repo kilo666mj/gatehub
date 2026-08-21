@@ -41,14 +41,16 @@ const (
 	decisionApproved = "approved"
 	decisionBlocked  = "blocked"
 
-	maxObservationsPerBatch = 1000
-	maxFingerprintLength    = 256
-	maxObservationIPs       = 128
-	maxObservationPorts     = 128
-	maxObservationMetaKeys  = 32
-	maxObservationMetaBytes = 8192
-	maxNodeTokenLength      = 4096
-	minNodeTokenLength      = 32
+	maxObservationsPerBatch  = 1000
+	maxFingerprintLength     = 256
+	maxObservationIPs        = 128
+	maxObservationPorts      = 128
+	maxObservationMetaKeys   = 32
+	maxObservationMetaBytes  = 8192
+	maxNodeTokenLength       = 4096
+	minNodeTokenLength       = 32
+	defaultSightingRetention = 8 * 24 * time.Hour
+	sightingPruneInterval    = time.Hour
 )
 
 type config struct {
@@ -70,6 +72,7 @@ type config struct {
 	AdminOIDCAllowedEmails   string
 	AdminOIDCAllowedGroups   string
 	AdminSessionMaxAge       int
+	SightingRetention        time.Duration
 }
 
 type app struct {
@@ -90,6 +93,10 @@ func main() {
 		log.Fatalf("init admin auth: %v", err)
 	}
 	a := &app{store: store, auth: auth}
+	if _, err := store.PruneSightingsBefore(time.Now().Add(-cfg.SightingRetention)); err != nil {
+		log.Fatalf("prune fingerprint sightings: %v", err)
+	}
+	go startSightingPruner(store, cfg.SightingRetention)
 	errCh := make(chan error, 2)
 	if cfg.AdminListen != "" {
 		go func() {
@@ -153,7 +160,11 @@ func parseConfig() config {
 	flag.StringVar(&cfg.AdminOIDCAllowedEmails, "admin-oidc-allowed-emails", "", "comma-separated allowlist of email claims")
 	flag.StringVar(&cfg.AdminOIDCAllowedGroups, "admin-oidc-allowed-groups", "", "comma-separated allowlist of group claims")
 	flag.IntVar(&cfg.AdminSessionMaxAge, "admin-session-max-age", 28800, "admin session lifetime in seconds; 0 means no expiry")
+	flag.DurationVar(&cfg.SightingRetention, "sighting-retention", defaultSightingRetention, "how long to retain per-IP fingerprint sightings")
 	flag.Parse()
+	if cfg.SightingRetention <= 0 {
+		log.Fatalf("--sighting-retention must be positive")
+	}
 	if cfg.AdminOIDCClientSecret == "" {
 		cfg.AdminOIDCClientSecret = os.Getenv("GATEHUB_ADMIN_OIDC_CLIENT_SECRET")
 	}
@@ -178,6 +189,19 @@ func parseConfig() config {
 		log.Fatalf("invalid --admin-auth %q (want oidc or none)", cfg.AdminAuth)
 	}
 	return cfg
+}
+
+func startSightingPruner(store *Store, retention time.Duration) {
+	ticker := time.NewTicker(sightingPruneInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		deleted, err := store.PruneSightingsBefore(time.Now().Add(-retention))
+		if err != nil {
+			log.Printf("prune fingerprint sightings: %v", err)
+		} else if deleted > 0 {
+			log.Printf("pruned %d expired fingerprint sighting(s)", deleted)
+		}
+	}
 }
 
 func loadPublicTLSConfig(cfg config) (*tls.Config, error) {
@@ -285,9 +309,16 @@ type Fingerprint struct {
 	LastSeen    string         `json:"last_seen,omitempty"`
 	IPs         []string       `json:"ips,omitempty"`
 	Ports       []int          `json:"ports,omitempty"`
+	Sightings   []Sighting     `json:"sightings,omitempty"`
 	Count       int            `json:"count,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 	UpdatedAt   string         `json:"updated_at"`
+}
+
+type Sighting struct {
+	IP       string `json:"ip"`
+	Port     int    `json:"port,omitempty"`
+	LastSeen string `json:"last_seen"`
 }
 
 type FingerprintGroup struct {
@@ -377,6 +408,15 @@ func (s *Store) init() error {
 			updated_at TEXT NOT NULL,
 			actor TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS fingerprint_sightings (
+			node_id TEXT NOT NULL,
+			fingerprint TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			port INTEGER NOT NULL DEFAULT 0,
+			last_seen TEXT NOT NULL,
+			PRIMARY KEY (node_id, fingerprint, ip, port),
+			FOREIGN KEY (node_id, fingerprint) REFERENCES fingerprints(node_id, fingerprint) ON DELETE CASCADE
+		)`,
 		`CREATE TABLE IF NOT EXISTS audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			actor TEXT NOT NULL,
@@ -388,6 +428,7 @@ func (s *Store) init() error {
 		`CREATE INDEX IF NOT EXISTS idx_fingerprints_last_seen ON fingerprints(last_seen)`,
 		`CREATE INDEX IF NOT EXISTS idx_fingerprints_status ON fingerprints(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_decisions_scope ON decisions(scope_type, scope_id, fingerprint, updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_fingerprint_sightings_ip_seen ON fingerprint_sightings(ip, last_seen)`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -531,6 +572,15 @@ func (s *Store) UpsertObservations(node Node, observations []Fingerprint) error 
 			fp.LastSeen, ips, ports, fp.Count, meta, now); err != nil {
 			return err
 		}
+		for _, sighting := range fp.Sightings {
+			if _, err := tx.Exec(`
+				INSERT INTO fingerprint_sightings (node_id, fingerprint, ip, port, last_seen)
+				VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT(node_id, fingerprint, ip, port) DO UPDATE SET last_seen = excluded.last_seen`,
+				node.ID, fp.Fingerprint, sighting.IP, sighting.Port, sighting.LastSeen); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := tx.Exec(`UPDATE nodes SET last_seen = ? WHERE id = ?`, now, node.ID); err != nil {
 		return err
@@ -567,6 +617,16 @@ func (s *Store) Fingerprints(status string) ([]Fingerprint, error) {
 		fps = append(fps, fp)
 	}
 	return fps, rows.Err()
+}
+
+// PruneSightingsBefore bounds correlation data without removing the aggregate
+// fingerprint records or their manual decisions.
+func (s *Store) PruneSightingsBefore(cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM fingerprint_sightings WHERE julianday(last_seen) < julianday(?)`, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) CreateDecision(d Decision) error {
@@ -1123,6 +1183,23 @@ func validateObservation(fp Fingerprint) error {
 	for _, port := range fp.Ports {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("invalid port %d for %s", port, fp.Fingerprint)
+		}
+	}
+	if len(fp.Sightings) > maxObservationIPs {
+		return fmt.Errorf("too many sightings for %s: %d > %d", fp.Fingerprint, len(fp.Sightings), maxObservationIPs)
+	}
+	for _, sighting := range fp.Sightings {
+		if _, err := netip.ParseAddr(sighting.IP); err != nil {
+			return fmt.Errorf("invalid sighting IP %q for %s", sighting.IP, fp.Fingerprint)
+		}
+		if sighting.Port < 0 || sighting.Port > 65535 {
+			return fmt.Errorf("invalid sighting port %d for %s", sighting.Port, fp.Fingerprint)
+		}
+		if len(sighting.LastSeen) > 64 {
+			return errors.New("sighting timestamp is too long")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, sighting.LastSeen); err != nil {
+			return fmt.Errorf("invalid sighting timestamp for %s: %w", fp.Fingerprint, err)
 		}
 	}
 	if len(fp.Metadata) > maxObservationMetaKeys {
