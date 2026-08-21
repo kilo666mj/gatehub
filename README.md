@@ -221,3 +221,9 @@ values can contain credentials and personal data:
   }]
 }
 ```
+
+The authenticated admin endpoint `GET /api/web-candidates` correlates signals
+with TLS sightings from the same host within five minutes and returns
+report-only candidates grouped by gate instance and fingerprint. It never
+creates a decision. Optional `window` (maximum `30m`) and RFC3339 `since`
+parameters support investigation within the retained evidence window.

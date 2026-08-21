@@ -345,6 +345,22 @@ type AbuseSignal struct {
 	WindowSeconds int    `json:"window_seconds"`
 }
 
+type WebCandidate struct {
+	NodeID      string   `json:"node_id"`
+	Host        string   `json:"host"`
+	Fingerprint string   `json:"fingerprint"`
+	Status      string   `json:"status"`
+	Label       string   `json:"label,omitempty"`
+	Networks    []string `json:"networks"`
+	Sites       []string `json:"sites"`
+	Signals     int      `json:"signals"`
+	Connections int      `json:"connections"`
+	Errors      int      `json:"errors"`
+	Successes   int      `json:"successes"`
+	FirstSeen   string   `json:"first_seen"`
+	LastSeen    string   `json:"last_seen"`
+}
+
 type FingerprintGroup struct {
 	Fingerprint string
 	Status      string
@@ -704,6 +720,100 @@ func (s *Store) PruneAbuseSignalsBefore(cutoff time.Time) (int64, error) {
 	return res.RowsAffected()
 }
 
+// WebCandidates correlates signals only with TLS sightings on the same host
+// and within window. It is report-only and never creates a policy decision.
+func (s *Store) WebCandidates(since time.Time, window time.Duration) ([]WebCandidate, error) {
+	rows, err := s.db.Query(`
+		SELECT f.node_id, f.host, f.fingerprint, f.status, f.label,
+			sig.event_id, sig.site, sig.ip, sig.observed_at,
+			sig.connections, sig.errors, sig.successes
+		FROM web_abuse_signals sig
+		JOIN fingerprint_sightings sight ON sight.ip = sig.ip
+		JOIN fingerprints f ON f.node_id = sight.node_id AND f.fingerprint = sight.fingerprint
+		WHERE f.kind = 'tlsgate'
+		  AND f.host = sig.host
+		  AND julianday(sig.observed_at) >= julianday(?)
+		  AND ABS((julianday(sig.observed_at) - julianday(sight.last_seen)) * 86400.0) <= ?
+		ORDER BY sig.observed_at, sig.event_id`, since.UTC().Format(time.RFC3339Nano), window.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type aggregate struct {
+		candidate WebCandidate
+		events    map[string]struct{}
+		networks  map[string]struct{}
+		sites     map[string]struct{}
+	}
+	aggregates := make(map[string]*aggregate)
+	for rows.Next() {
+		var nodeID, host, fp, status, label, eventID, site, ip, observedAt string
+		var connections, errors, successes int
+		if err := rows.Scan(&nodeID, &host, &fp, &status, &label, &eventID, &site, &ip, &observedAt, &connections, &errors, &successes); err != nil {
+			return nil, err
+		}
+		key := nodeID + "\x00" + fp
+		agg := aggregates[key]
+		if agg == nil {
+			agg = &aggregate{
+				candidate: WebCandidate{NodeID: nodeID, Host: host, Fingerprint: fp, Status: status, Label: label},
+				events:    make(map[string]struct{}), networks: make(map[string]struct{}), sites: make(map[string]struct{}),
+			}
+			aggregates[key] = agg
+		}
+		if _, duplicate := agg.events[eventID]; duplicate {
+			continue
+		}
+		agg.events[eventID] = struct{}{}
+		agg.networks[sourceNetwork(ip)] = struct{}{}
+		agg.sites[site] = struct{}{}
+		agg.candidate.Signals++
+		agg.candidate.Connections += connections
+		agg.candidate.Errors += errors
+		agg.candidate.Successes += successes
+		if agg.candidate.FirstSeen == "" || observedAt < agg.candidate.FirstSeen {
+			agg.candidate.FirstSeen = observedAt
+		}
+		if observedAt > agg.candidate.LastSeen {
+			agg.candidate.LastSeen = observedAt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	candidates := make([]WebCandidate, 0, len(aggregates))
+	for _, agg := range aggregates {
+		for network := range agg.networks {
+			agg.candidate.Networks = append(agg.candidate.Networks, network)
+		}
+		for site := range agg.sites {
+			agg.candidate.Sites = append(agg.candidate.Sites, site)
+		}
+		sort.Strings(agg.candidate.Networks)
+		sort.Strings(agg.candidate.Sites)
+		candidates = append(candidates, agg.candidate)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if len(candidates[i].Networks) != len(candidates[j].Networks) {
+			return len(candidates[i].Networks) > len(candidates[j].Networks)
+		}
+		return candidates[i].LastSeen > candidates[j].LastSeen
+	})
+	return candidates, nil
+}
+
+func sourceNetwork(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ""
+	}
+	bits := 64
+	if addr.Is4() {
+		bits = 24
+	}
+	return netip.PrefixFrom(addr, bits).Masked().String()
+}
+
 func (s *Store) CreateDecision(d Decision) error {
 	if err := validateDecision(d); err != nil {
 		return err
@@ -851,6 +961,7 @@ func (a *app) adminMux() http.Handler {
 	mux.HandleFunc("POST /nodes/status", a.auth.require(a.handleAdminNodeStatus))
 	mux.HandleFunc("POST /decisions", a.auth.require(a.handleAdminDecision))
 	mux.HandleFunc("GET /api/fingerprints", a.auth.require(a.handleAdminFingerprintsAPI))
+	mux.HandleFunc("GET /api/web-candidates", a.auth.require(a.handleAdminWebCandidatesAPI))
 	return mux
 }
 
@@ -1248,6 +1359,33 @@ func (a *app) handleAdminFingerprintsAPI(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"fingerprints": fps})
+}
+
+func (a *app) handleAdminWebCandidatesAPI(w http.ResponseWriter, r *http.Request) {
+	window := 5 * time.Minute
+	if raw := r.URL.Query().Get("window"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 || parsed > 30*time.Minute {
+			writeError(w, http.StatusBadRequest, errors.New("window must be between 1ns and 30m"))
+			return
+		}
+		window = parsed
+	}
+	since := time.Now().Add(-24 * time.Hour)
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || parsed.Before(time.Now().Add(-defaultSightingRetention)) {
+			writeError(w, http.StatusBadRequest, errors.New("since must be an RFC3339 timestamp within the retention window"))
+			return
+		}
+		since = parsed
+	}
+	candidates, err := a.store.WebCandidates(since, window)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mode": "report_only", "candidates": candidates})
 }
 
 func validateNode(n Node) error {

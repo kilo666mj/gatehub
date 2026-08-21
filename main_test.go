@@ -151,6 +151,40 @@ func TestValidateAbuseSignalRejectsRawTargetLikeTrigger(t *testing.T) {
 	}
 }
 
+func TestWebCandidatesRequireSameHostAndNearbySighting(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	tlsNode := Node{ID: "web-tls", Kind: "tlsgate", Host: "web.example.com", AllowedCertName: "web", Status: statusActive}
+	logNode := Node{ID: "logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
+	for _, node := range []Node{tlsNode, logNode} {
+		if err := store.UpsertNode(node); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.UpsertObservations(tlsNode, []Fingerprint{{
+		Fingerprint: "t13d_example", Sightings: []Sighting{{IP: "192.0.2.10", Port: 443, LastSeen: "2026-08-21T15:00:00Z"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	base := AbuseSignal{EventID: "one", ObservedAt: "2026-08-21T15:01:00Z", Host: "web.example.com", Site: "example", IP: "192.0.2.10", Trigger: "suspicious_uri", Connections: 10, Errors: 10, WindowSeconds: 60}
+	wrongHost := base
+	wrongHost.EventID = "two"
+	wrongHost.Host = "other.example.com"
+	if err := store.UpsertAbuseSignals(logNode, []AbuseSignal{base, wrongHost}); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := store.WebCandidates(time.Date(2026, 8, 21, 14, 0, 0, 0, time.UTC), 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].Signals != 1 || len(candidates[0].Networks) != 1 || candidates[0].Networks[0] != "192.0.2.0/24" {
+		t.Fatalf("candidates = %+v", candidates)
+	}
+}
+
 func TestObservationDoesNotOverrideDecision(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
