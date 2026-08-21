@@ -42,6 +42,7 @@ const (
 	decisionBlocked  = "blocked"
 
 	maxObservationsPerBatch  = 1000
+	maxSignalsPerBatch       = 1000
 	maxFingerprintLength     = 256
 	maxObservationIPs        = 128
 	maxObservationPorts      = 128
@@ -95,6 +96,9 @@ func main() {
 	a := &app{store: store, auth: auth}
 	if _, err := store.PruneSightingsBefore(time.Now().Add(-cfg.SightingRetention)); err != nil {
 		log.Fatalf("prune fingerprint sightings: %v", err)
+	}
+	if _, err := store.PruneAbuseSignalsBefore(time.Now().Add(-cfg.SightingRetention)); err != nil {
+		log.Fatalf("prune web abuse signals: %v", err)
 	}
 	go startSightingPruner(store, cfg.SightingRetention)
 	errCh := make(chan error, 2)
@@ -200,6 +204,11 @@ func startSightingPruner(store *Store, retention time.Duration) {
 			log.Printf("prune fingerprint sightings: %v", err)
 		} else if deleted > 0 {
 			log.Printf("pruned %d expired fingerprint sighting(s)", deleted)
+		}
+		if deleted, err := store.PruneAbuseSignalsBefore(time.Now().Add(-retention)); err != nil {
+			log.Printf("prune web abuse signals: %v", err)
+		} else if deleted > 0 {
+			log.Printf("pruned %d expired web abuse signal(s)", deleted)
 		}
 	}
 }
@@ -321,6 +330,21 @@ type Sighting struct {
 	LastSeen string `json:"last_seen"`
 }
 
+// AbuseSignal is deliberately aggregate-only. Raw request targets are not
+// accepted because access-log paths can contain credentials and identifiers.
+type AbuseSignal struct {
+	EventID       string `json:"event_id"`
+	ObservedAt    string `json:"observed_at"`
+	Host          string `json:"host"`
+	Site          string `json:"site"`
+	IP            string `json:"ip"`
+	Trigger       string `json:"trigger"`
+	Connections   int    `json:"connections"`
+	Errors        int    `json:"errors"`
+	Successes     int    `json:"successes"`
+	WindowSeconds int    `json:"window_seconds"`
+}
+
 type FingerprintGroup struct {
 	Fingerprint string
 	Status      string
@@ -417,6 +441,22 @@ func (s *Store) init() error {
 			PRIMARY KEY (node_id, fingerprint, ip, port),
 			FOREIGN KEY (node_id, fingerprint) REFERENCES fingerprints(node_id, fingerprint) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS web_abuse_signals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			event_id TEXT NOT NULL,
+			observed_at TEXT NOT NULL,
+			received_at TEXT NOT NULL,
+			host TEXT NOT NULL,
+			site TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			trigger TEXT NOT NULL,
+			connections INTEGER NOT NULL,
+			errors INTEGER NOT NULL,
+			successes INTEGER NOT NULL,
+			window_seconds INTEGER NOT NULL,
+			UNIQUE (node_id, event_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			actor TEXT NOT NULL,
@@ -429,6 +469,7 @@ func (s *Store) init() error {
 		`CREATE INDEX IF NOT EXISTS idx_fingerprints_status ON fingerprints(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_decisions_scope ON decisions(scope_type, scope_id, fingerprint, updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_fingerprint_sightings_ip_seen ON fingerprint_sightings(ip, last_seen)`,
+		`CREATE INDEX IF NOT EXISTS idx_web_abuse_signals_ip_seen ON web_abuse_signals(ip, observed_at)`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -629,6 +670,40 @@ func (s *Store) PruneSightingsBefore(cutoff time.Time) (int64, error) {
 	return res.RowsAffected()
 }
 
+func (s *Store) UpsertAbuseSignals(node Node, signals []AbuseSignal) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	receivedAt := nowString()
+	for _, signal := range signals {
+		if err := validateAbuseSignal(signal); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO web_abuse_signals (
+				node_id, event_id, observed_at, received_at, host, site, ip, trigger,
+				connections, errors, successes, window_seconds
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(node_id, event_id) DO NOTHING`,
+			node.ID, signal.EventID, signal.ObservedAt, receivedAt, signal.Host,
+			signal.Site, signal.IP, signal.Trigger, signal.Connections, signal.Errors,
+			signal.Successes, signal.WindowSeconds); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) PruneAbuseSignalsBefore(cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM web_abuse_signals WHERE julianday(observed_at) < julianday(?)`, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) CreateDecision(d Decision) error {
 	if err := validateDecision(d); err != nil {
 		return err
@@ -748,6 +823,7 @@ func (a *app) publicMux() http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /v1/observations/batch", a.handleObservationBatch)
+	mux.HandleFunc("POST /v1/signals/batch", a.handleSignalBatch)
 	mux.HandleFunc("GET /v1/policy", a.handlePolicy)
 	return mux
 }
@@ -821,6 +897,40 @@ func serveManifest(w http.ResponseWriter, r *http.Request) {
 type observationBatchRequest struct {
 	InstanceID   string        `json:"instance_id"`
 	Observations []Fingerprint `json:"observations"`
+}
+
+type signalBatchRequest struct {
+	InstanceID string        `json:"instance_id"`
+	Signals    []AbuseSignal `json:"signals"`
+}
+
+func (a *app) handleSignalBatch(w http.ResponseWriter, r *http.Request) {
+	node, ok := a.authorizeNode(w, r, r.URL.Query().Get("instance_id"))
+	if !ok {
+		return
+	}
+	if node.Kind != "log_watcher" {
+		writeError(w, http.StatusForbidden, errors.New("node is not a web signal source"))
+		return
+	}
+	var req signalBatchRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.InstanceID != "" && req.InstanceID != node.ID {
+		writeError(w, http.StatusForbidden, errors.New("request instance_id does not match authorized node"))
+		return
+	}
+	if len(req.Signals) > maxSignalsPerBatch {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("too many signals: %d > %d", len(req.Signals), maxSignalsPerBatch))
+		return
+	}
+	if err := a.store.UpsertAbuseSignals(node, req.Signals); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(req.Signals)})
 }
 
 func (a *app) handleObservationBatch(w http.ResponseWriter, r *http.Request) {
@@ -1144,11 +1254,36 @@ func validateNode(n Node) error {
 	if n.ID == "" || n.Kind == "" || n.Host == "" || n.AllowedCertName == "" {
 		return errors.New("id, kind, host, and allowed_cert_name are required")
 	}
-	if n.Kind != "tlsgate" && n.Kind != "sshgate" {
+	if n.Kind != "tlsgate" && n.Kind != "sshgate" && n.Kind != "log_watcher" {
 		return fmt.Errorf("invalid kind %q", n.Kind)
 	}
 	if n.Status != "" && !validNodeStatus(n.Status) {
 		return fmt.Errorf("invalid node status %q", n.Status)
+	}
+	return nil
+}
+
+func validateAbuseSignal(signal AbuseSignal) error {
+	if signal.EventID == "" || len(signal.EventID) > 128 || strings.ContainsAny(signal.EventID, " \t\r\n") {
+		return errors.New("event_id is required and must be a compact value of at most 128 bytes")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, signal.ObservedAt); err != nil {
+		return fmt.Errorf("invalid observed_at: %w", err)
+	}
+	if len(signal.Host) == 0 || len(signal.Host) > 256 || len(signal.Site) == 0 || len(signal.Site) > 256 {
+		return errors.New("host and site are required and must be at most 256 bytes")
+	}
+	if _, err := netip.ParseAddr(signal.IP); err != nil {
+		return fmt.Errorf("invalid signal IP %q", signal.IP)
+	}
+	if signal.Trigger == "" || len(signal.Trigger) > 64 || strings.ContainsAny(signal.Trigger, " \t\r\n/?:&=") {
+		return errors.New("trigger is required and must be a compact rule identifier")
+	}
+	if signal.Connections <= 0 || signal.Connections > 1_000_000_000 || signal.Errors < 0 || signal.Successes < 0 || signal.Errors+signal.Successes > signal.Connections {
+		return errors.New("invalid signal counters")
+	}
+	if signal.WindowSeconds <= 0 || signal.WindowSeconds > 86400 {
+		return errors.New("window_seconds must be between 1 and 86400")
 	}
 	return nil
 }
@@ -1606,7 +1741,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       <form class="grid" method="post" action="/nodes">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <label>Instance ID<input name="id" placeholder="mail-tls" required></label>
-        <label>Kind<select name="kind"><option>tlsgate</option><option>sshgate</option></select></label>
+        <label>Kind<select name="kind"><option>tlsgate</option><option>sshgate</option><option>log_watcher</option></select></label>
         <label>Host<input name="host" placeholder="mail-gateway" required></label>
         <label>Allowed cert name<input name="allowed_cert_name" placeholder="mail-gateway" required></label>
         <label>Node token<input name="token" type="password" placeholder="leave blank to keep"></label>

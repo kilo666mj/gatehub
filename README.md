@@ -80,6 +80,7 @@ go run . \
 Expose only these public paths through the internet-facing reverse proxy:
 
 - `POST /v1/observations/batch`
+- `POST /v1/signals/batch`
 - `GET /v1/policy`
 - `GET /healthz`
 
@@ -195,5 +196,28 @@ GET /v1/policy?instance_id=mail-tls&since=2026-07-01T10:00:00Z
       "actor": "admin"
     }
   ]
+}
+```
+
+Web signal nodes registered with kind `log_watcher` may upload aggregate
+scanner evidence to `POST /v1/signals/batch?instance_id=<id>`. The schema
+intentionally has no raw request-target or user-agent field because access-log
+values can contain credentials and personal data:
+
+```json
+{
+  "instance_id": "central-logs",
+  "signals": [{
+    "event_id": "01example",
+    "observed_at": "2026-08-21T15:00:00Z",
+    "host": "web-1",
+    "site": "example",
+    "ip": "203.0.113.10",
+    "trigger": "suspicious_uri",
+    "connections": 20,
+    "errors": 18,
+    "successes": 2,
+    "window_seconds": 120
+  }]
 }
 ```

@@ -109,6 +109,48 @@ func TestPruneSightingsBefore(t *testing.T) {
 	}
 }
 
+func TestUpsertAbuseSignalsDeduplicatesAndPrunes(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	node := Node{ID: "logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	signal := AbuseSignal{
+		EventID: "event-1", ObservedAt: "2026-07-01T00:00:00Z", Host: "web-1",
+		Site: "example", IP: "192.0.2.10", Trigger: "suspicious_uri",
+		Connections: 12, Errors: 10, Successes: 2, WindowSeconds: 120,
+	}
+	if err := store.UpsertAbuseSignals(node, []AbuseSignal{signal, signal}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM web_abuse_signals`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("signals = %d, want deduplicated 1", count)
+	}
+	deleted, err := store.PruneAbuseSignalsBefore(time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil || deleted != 1 {
+		t.Fatalf("prune = (%d, %v), want (1, nil)", deleted, err)
+	}
+}
+
+func TestValidateAbuseSignalRejectsRawTargetLikeTrigger(t *testing.T) {
+	signal := AbuseSignal{
+		EventID: "event-1", ObservedAt: "2026-08-01T00:00:00Z", Host: "web-1",
+		Site: "example", IP: "192.0.2.10", Trigger: "/hooks/secret",
+		Connections: 1, Errors: 1, WindowSeconds: 60,
+	}
+	if err := validateAbuseSignal(signal); err == nil {
+		t.Fatal("raw request target accepted as a trigger")
+	}
+}
+
 func TestObservationDoesNotOverrideDecision(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
