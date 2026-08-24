@@ -8,115 +8,45 @@
 > assistant (OpenAI's GPT-5, via Codex). The code has been reviewed and tested,
 > but treat it accordingly: read it before you run it.
 
-Shared control plane for `tlsgate` and `sshgate` fingerprint approvals.
+Gatehub is the shared control plane for
+[TLSGate](https://github.com/kilo666mj/tlsgate) and
+[SSHGate](https://github.com/kilo666mj/sshgate) fingerprint observations and
+approval decisions.
 
-The service has two HTTP surfaces:
+It exposes two separate HTTP surfaces:
 
-- Admin listener: internal UI/API for registering nodes and approving,
-  blocking, or labeling fingerprints. Gated by WebAuthn (passkey) login with
-  server-side sessions.
-- Public listener: mTLS-only sync API for gate instances. It exposes only
-  node sync paths.
+- An internal admin UI/API for registering nodes and approving, blocking, or
+  labeling fingerprints.
+- A narrowly scoped synchronization API for gate instances, authenticated with
+  node credentials or mTLS.
 
-## Admin Authentication
+Do not expose the admin listener as the public synchronization surface.
 
-The admin surface authenticates through **OpenID Connect** by default
-(`--admin-auth oidc`), acting as a relying party against your provider (e.g.
-Pocket ID). Register an OIDC client on the provider whose redirect URL points at
-this app's `/api/auth/callback`, then run:
+## Quick start
 
-```sh
-go run . --db ./gatehub.sqlite \
-  --admin-listen 127.0.0.1:8081 \
-  --admin-oidc-issuer https://pocket-id.example.com \
-  --admin-oidc-client-id gatehub \
-  --admin-oidc-redirect-url https://gatehub.example.com/api/auth/callback \
-  --admin-oidc-allowed-emails you@example.com
-# client secret via env (kept out of argv):
-export GATEHUB_ADMIN_OIDC_CLIENT_SECRET=...
-```
-
-Serve the admin UI over `https://` (a reverse proxy) or reach it as
-`http://127.0.0.1` / `localhost` over an SSH tunnel; the redirect URL must match
-the hostname the browser uses. `/login` shows a single "Sign in with Pocket ID"
-button that starts the authorization-code + PKCE flow. On return, the verified
-identity is checked against the optional `--admin-oidc-allowed-{subjects,emails,groups}`
-allowlists before a session is issued. Sessions live in the same SQLite database;
-lifetime is `--admin-session-max-age` seconds (default 8h; `0` disables expiry).
-The OIDC relying-party flow is provided by
-[`github.com/kilo666mj/oidcrp`](https://github.com/kilo666mj/oidcrp).
-
-For localhost-only development you can disable auth with `--admin-auth none`.
-The process refuses to start an OIDC admin listener without an issuer, client ID,
-and redirect URL, so a misconfiguration cannot silently expose the approval API.
-
-Client certificates are used as node identity. A node must be registered in
-`gatehub` before it can sync, and its configured `allowed_cert_name`
-must match the client certificate Common Name, DNS SAN, or URI SAN.
-
-## Run Admin Only
-
-```sh
-go run . --db ./gatehub.sqlite --admin-listen 127.0.0.1:8081 --admin-auth none
-```
-
-Open `http://127.0.0.1:8081` from an internal network or over a tunnel.
-`--admin-auth none` disables OIDC auth and is for localhost development only;
-see [Admin Authentication](#admin-authentication) for the production setup.
-
-## Run Public mTLS Sync
+Run an unauthenticated, loopback-only development instance:
 
 ```sh
 go run . \
   --db ./gatehub.sqlite \
   --admin-listen 127.0.0.1:8081 \
-  --public-listen 127.0.0.1:8443 \
-  --public-cert /path/to/server.crt \
-  --public-key /path/to/server.key \
-  --client-ca /path/to/client-ca.crt \
-  --client-crl /path/to/client-ca.crl.pem
+  --admin-auth none
 ```
 
-Expose only these public paths through the internet-facing reverse proxy:
+Open `http://127.0.0.1:8081`.
 
-- `POST /v1/observations/batch`
-- `POST /v1/signals/batch`
-- `GET /v1/policy`
-- `GET /healthz`
+Production administration uses OpenID Connect. Register
+`https://gatehub.example.com/api/auth/callback` with the identity provider,
+then configure the issuer, client ID, redirect URL, and optional subject, email,
+or group allowlists. Gatehub refuses to start an OIDC admin listener with an
+incomplete configuration.
 
-Do not proxy the admin listener publicly.
+Nodes must be registered before they can synchronize. Their configured
+certificate identity or bearer token is bound to the instance ID they report.
 
-## Node Registration
+## Deployment
 
-Nodes can be registered through the authenticated admin UI or locally with the
-administrative CLI. The CLI reads tokens from a file or standard input so they
-do not appear in process arguments or shell history:
-
-```sh
-gatehub register-node --db /var/lib/gatehub/gatehub.sqlite \
-  --id logs-central --kind log_watcher --host logwc \
-  --allowed-cert-name logs-central --token-file /run/secrets/log-watcher-token
-```
-
-Use `--token-file -` to read one newline-terminated token from standard input.
-The token is hashed before storage and is never printed.
-
-Create a node in the admin UI:
-
-```text
-Instance ID: mail-tls
-Kind: tlsgate
-Host: mail-gateway
-Allowed cert name: mail-gateway
-```
-
-The public API will then accept requests for `instance_id=mail-tls` only
-when the mTLS client certificate identifies as `mail-gateway`.
-
-## Ansible Deployment
-
-The included playbook deploys `gatehub` to the hosts in `ansible/inventory`.
-Replace the sample inventory with your deployment host before running it:
+The included Ansible playbook installs Gatehub and its systemd service:
 
 ```sh
 cd ansible
@@ -124,119 +54,51 @@ ansible-playbook --syntax-check playbook.yml
 ansible-playbook playbook.yml
 ```
 
-Default listeners:
-
-- Admin UI/API: `0.0.0.0:8081`
-- Public mTLS sync API: `127.0.0.1:9443`
-
-Place or override the server certificate, server key, and client CA paths before
-starting the service. The defaults are:
+The normal topology keeps the admin listener behind an internal HTTPS reverse
+proxy while exposing only these synchronization paths:
 
 ```text
-/etc/gatehub/server.crt
-/etc/gatehub/server.key
-/etc/gatehub/client-ca.crt
+POST /v1/observations/batch
+POST /v1/signals/batch
+GET  /v1/policy
+GET  /healthz
 ```
 
-By default the playbook generates a self-signed server certificate if
-`server.crt`/`server.key` are missing. To copy a local client CA certificate to
-the target during deploy, pass:
+If TLS terminates at a proxy, ensure the selected node-authentication mechanism
+still reaches Gatehub. A conventional HTTP reverse proxy does not forward the
+original client certificate automatically.
+
+See [deployment and authentication](docs/deployment.md) for OIDC, node
+registration, certificates, listener configuration, and Ansible variables.
+
+## API
+
+Gate instances upload fingerprint observations and pull approval policy.
+Signal-producing nodes can submit privacy-bounded aggregate scanner evidence;
+the admin API correlates those signals with recent TLS sightings but never
+creates approval decisions automatically.
+
+See the [synchronization API reference](docs/api.md) for request and response
+examples, retention behavior, and the web-candidate endpoint.
+
+## Development
 
 ```sh
-ansible-playbook playbook.yml -e gatehub_client_ca_src=/path/to/client-ca.crt
+go build ./...
+go test ./...
 ```
 
-If you put `127.0.0.1:9443` behind a normal HTTP reverse proxy or tunnel, make
-sure client certificate identity still reaches `gatehub`. Standard HTTP
-termination at the proxy will not pass the node mTLS certificate through to the
-origin process.
+Gatehub uses SQLite for durable state. Treat the live database and its
+credential-bearing contents as sensitive operational data.
 
-## Sync API
+## Documentation
 
-Observation upload:
+- [Deployment and authentication](docs/deployment.md)
+- [Synchronization API](docs/api.md)
+- [TLSGate](https://github.com/kilo666mj/tlsgate)
+- [SSHGate](https://github.com/kilo666mj/sshgate)
+- [OIDC relying-party helper](https://github.com/kilo666mj/oidcrp)
 
-```http
-POST /v1/observations/batch?instance_id=mail-tls
-```
+## License
 
-```json
-{
-  "instance_id": "mail-tls",
-  "observations": [
-    {
-      "fingerprint": "abc123",
-      "status": "blocked",
-      "first_seen": "2026-07-01T10:00:00Z",
-      "last_seen": "2026-07-01T10:01:00Z",
-      "ips": ["203.0.113.10"],
-      "ports": [993],
-      "sightings": [
-        {"ip": "203.0.113.10", "port": 993, "last_seen": "2026-07-01T10:01:00Z"}
-      ],
-      "count": 2,
-      "metadata": {
-        "sni": "mail.example.com",
-        "ja3": "...",
-        "ja4": "..."
-      }
-    }
-  ]
-}
-```
-
-Timestamped sightings preserve the IP/port pairing needed for later event
-correlation. Gatehub retains them for eight days by default; configure
-`--sighting-retention` to change the bounded retention window. Aggregate
-fingerprint records and decisions are not removed by sighting cleanup.
-
-Policy pull:
-
-```http
-GET /v1/policy?instance_id=mail-tls&since=2026-07-01T10:00:00Z
-```
-
-```json
-{
-  "cursor": "2026-07-01T10:05:00Z",
-  "decisions": [
-    {
-      "scope_type": "instance",
-      "scope_id": "mail-tls",
-      "fingerprint": "abc123",
-      "status": "approved",
-      "label": "Alice iPhone",
-      "updated_at": "2026-07-01T10:05:00Z",
-      "actor": "admin"
-    }
-  ]
-}
-```
-
-Web signal nodes registered with kind `log_watcher` may upload aggregate
-scanner evidence to `POST /v1/signals/batch?instance_id=<id>`. The schema
-intentionally has no raw request-target or user-agent field because access-log
-values can contain credentials and personal data:
-
-```json
-{
-  "instance_id": "central-logs",
-  "signals": [{
-    "event_id": "01example",
-    "observed_at": "2026-08-21T15:00:00Z",
-    "host": "web-1",
-    "site": "example",
-    "ip": "203.0.113.10",
-    "trigger": "suspicious_uri",
-    "connections": 20,
-    "errors": 18,
-    "successes": 2,
-    "window_seconds": 120
-  }]
-}
-```
-
-The authenticated admin endpoint `GET /api/web-candidates` correlates signals
-with TLS sightings from the same host within five minutes and returns
-report-only candidates grouped by gate instance and fingerprint. It never
-creates a decision. Optional `window` (maximum `30m`) and RFC3339 `since`
-parameters support investigation within the retained evidence window.
+MIT. See [LICENSE](LICENSE).
