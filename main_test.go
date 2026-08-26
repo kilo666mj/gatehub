@@ -187,6 +187,31 @@ func TestWebCandidatesRequireSameHostAndNearbySighting(t *testing.T) {
 	}
 }
 
+func TestWebSignalActivityIncludesUncorrelatedSignals(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	node := Node{ID: "central-logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertAbuseSignals(node, []AbuseSignal{{
+		EventID: "raw-1", ObservedAt: "2026-08-26T08:30:00Z", Host: "web.example.com",
+		Site: "example", IP: "192.0.2.44", Trigger: "error_rate", Connections: 10, Errors: 9, Successes: 1, WindowSeconds: 60,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.WebSignalActivity(time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Network != "192.0.2.0/24" || got[0].Signals != 1 || got[0].Connections != 10 {
+		t.Fatalf("activity = %+v", got)
+	}
+}
+
 func TestObservationDoesNotOverrideDecision(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
@@ -364,6 +389,48 @@ func TestAdminGlobalDecisionClearsInstanceScopeID(t *testing.T) {
 	}
 	if len(decisions) != 1 || decisions[0].ScopeType != "global" || decisions[0].ScopeID != "" {
 		t.Fatalf("decisions = %+v, want normalized global scope", decisions)
+	}
+}
+
+func TestAdminHomeShowsCorrelatedWebFindings(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	tlsNode := Node{ID: "web-tls", Kind: "tlsgate", Host: "web.example.com", AllowedCertName: "web", Status: statusActive}
+	logNode := Node{ID: "central-logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
+	for _, node := range []Node{tlsNode, logNode} {
+		if err := store.UpsertNode(node); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observed := time.Now().UTC().Add(-time.Minute)
+	if err := store.UpsertObservations(tlsNode, []Fingerprint{{
+		Fingerprint: "t13d_findings_test",
+		Sightings:   []Sighting{{IP: "192.0.2.10", Port: 443, LastSeen: observed.Format(time.RFC3339Nano)}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertAbuseSignals(logNode, []AbuseSignal{{
+		EventID: "finding-1", ObservedAt: observed.Add(30 * time.Second).Format(time.RFC3339Nano),
+		Host: "web.example.com", Site: "example.com", IP: "192.0.2.10", Trigger: "error_rate",
+		Connections: 12, Errors: 10, Successes: 2, WindowSeconds: 120,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := app{store: store, auth: &AuthService{}}
+	rec := httptest.NewRecorder()
+	a.handleAdminHome(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"Web scanner activity", "Web scanner findings", "t13d_findings_test", "example.com", "192.0.2.0/24", "12"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("admin page missing %q", want)
+		}
 	}
 }
 

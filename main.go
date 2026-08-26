@@ -420,6 +420,20 @@ type WebCandidate struct {
 	LastSeen    string   `json:"last_seen"`
 }
 
+type WebSignalActivity struct {
+	NodeID      string `json:"node_id"`
+	Host        string `json:"host"`
+	Site        string `json:"site"`
+	Network     string `json:"network"`
+	Trigger     string `json:"trigger"`
+	Signals     int    `json:"signals"`
+	Connections int    `json:"connections"`
+	Errors      int    `json:"errors"`
+	Successes   int    `json:"successes"`
+	FirstSeen   string `json:"first_seen"`
+	LastSeen    string `json:"last_seen"`
+}
+
 type FingerprintGroup struct {
 	Fingerprint string
 	Status      string
@@ -873,6 +887,37 @@ func sourceNetwork(ip string) string {
 	return netip.PrefixFrom(addr, bits).Masked().String()
 }
 
+// WebSignalActivity reports accepted aggregate HTTP abuse signals without
+// implying that they are safe enforcement candidates. IPs are reduced to
+// source networks to match the privacy-limited candidate view.
+func (s *Store) WebSignalActivity(since time.Time) ([]WebSignalActivity, error) {
+	rows, err := s.db.Query(`
+		SELECT node_id, host, site, ip, trigger, COUNT(*),
+			SUM(connections), SUM(errors), SUM(successes),
+			MIN(observed_at), MAX(observed_at)
+		FROM web_abuse_signals
+		WHERE julianday(observed_at) >= julianday(?)
+		GROUP BY node_id, host, site, ip, trigger
+		ORDER BY MAX(observed_at) DESC`, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var activity []WebSignalActivity
+	for rows.Next() {
+		var item WebSignalActivity
+		var ip string
+		if err := rows.Scan(&item.NodeID, &item.Host, &item.Site, &ip, &item.Trigger,
+			&item.Signals, &item.Connections, &item.Errors, &item.Successes,
+			&item.FirstSeen, &item.LastSeen); err != nil {
+			return nil, err
+		}
+		item.Network = sourceNetwork(ip)
+		activity = append(activity, item)
+	}
+	return activity, rows.Err()
+}
+
 func (s *Store) CreateDecision(d Decision) error {
 	if err := validateDecision(d); err != nil {
 		return err
@@ -1237,14 +1282,26 @@ func (a *app) handleAdminHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fingerprintGroups := groupFingerprints(fps)
+	candidates, err := a.store.WebCandidates(time.Now().Add(-24*time.Hour), 5*time.Minute)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	activity, err := a.store.WebSignalActivity(time.Now().Add(-24 * time.Hour))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	data := struct {
 		Nodes             []Node
 		FingerprintGroups []FingerprintGroup
+		WebCandidates     []WebCandidate
+		WebActivity       []WebSignalActivity
 		ObservationCount  int
 		Statuses          []string
 		AuthEnabled       bool
 		CSRFToken         string
-	}{nodes, fingerprintGroups, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
+	}{nodes, fingerprintGroups, candidates, activity, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
 	if err := adminTemplate.Execute(w, data); err != nil {
 		log.Printf("render admin: %v", err)
 	}
@@ -1781,6 +1838,21 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       font-weight: 650;
       text-transform: uppercase;
     }
+    .section-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .link-btn {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      color: var(--teal);
+      background: #fff;
+      font-size: 12px;
+      font-weight: 720;
+      text-decoration: none;
+    }
+    .link-btn:hover { background: #edf7f5; }
     table { width: 100%; border-collapse: collapse; }
     th, td { border-bottom: 1px solid var(--line); padding: 10px 10px; text-align: left; vertical-align: top; }
     th { font-size: 11px; color: var(--muted); font-weight: 760; text-transform: uppercase; background: #f7f9f9; }
@@ -1903,6 +1975,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       margin-bottom: 7px;
     }
     .wrap { overflow-x: auto; }
+    .list { display: flex; flex-wrap: wrap; gap: 4px; }
     @media (max-width: 980px) {
       header { align-items: start; flex-direction: column; }
       .brand { align-items: center; }
@@ -1963,6 +2036,75 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
             </tr>
           {{else}}
             <tr><td colspan="8" class="muted">No nodes registered.</td></tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section id="web-activity">
+      <div class="section-head">
+        <div>
+          <h2>Web scanner activity</h2>
+          <span class="muted">Aggregate HTTP abuse signals received from log_watcher; informational and not correlated for enforcement</span>
+        </div>
+        <div class="section-tools">
+          <span class="section-count">{{len .WebActivity}} sources · last 24 hours · report only</span>
+          <a class="link-btn" href="/#web-activity">Refresh</a>
+        </div>
+      </div>
+      <div class="wrap">
+        <table>
+          <thead><tr><th data-sort="text">Last seen</th><th data-sort="text">Host</th><th data-sort="text">Site</th><th data-sort="text">Network</th><th data-sort="text">Trigger</th><th data-sort="number">Signals</th><th data-sort="number">Requests</th><th data-sort="number">Errors</th><th data-sort="text">First seen</th></tr></thead>
+          <tbody>
+          {{range .WebActivity}}
+            <tr>
+              <td data-value="{{.LastSeen}}">{{.LastSeen}}</td>
+              <td data-value="{{.Host}}"><strong>{{.Host}}</strong><div><code>{{.NodeID}}</code></div></td>
+              <td data-value="{{.Site}}"><span class="host-chip">{{.Site}}</span></td>
+              <td data-value="{{.Network}}"><code>{{.Network}}</code></td>
+              <td data-value="{{.Trigger}}">{{.Trigger}}</td>
+              <td data-value="{{.Signals}}">{{.Signals}}</td>
+              <td data-value="{{.Connections}}">{{.Connections}}</td>
+              <td data-value="{{.Errors}}">{{.Errors}}</td>
+              <td data-value="{{.FirstSeen}}">{{.FirstSeen}}</td>
+            </tr>
+          {{else}}
+            <tr><td colspan="9" class="muted">No web abuse signals received in the last 24 hours.</td></tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section id="web-findings">
+      <div class="section-head">
+        <div>
+          <h2>Web scanner findings</h2>
+          <span class="muted">HTTP abuse signals correlated with a TLS fingerprint on the same host within five minutes</span>
+        </div>
+        <div class="section-tools">
+          <span class="section-count">{{len .WebCandidates}} candidates · last 24 hours · report only</span>
+          <a class="link-btn" href="/#web-findings">Refresh</a>
+        </div>
+      </div>
+      <div class="wrap">
+        <table>
+          <thead><tr><th data-sort="text">Last seen</th><th data-sort="text">TLS fingerprint</th><th data-sort="text">Gate</th><th data-sort="status">Status</th><th data-sort="text">Sites</th><th data-sort="number">Networks</th><th data-sort="number">Signals</th><th data-sort="number">Requests</th><th data-sort="number">Errors</th><th data-sort="text">First seen</th></tr></thead>
+          <tbody>
+          {{range .WebCandidates}}
+            <tr>
+              <td data-value="{{.LastSeen}}">{{.LastSeen}}</td>
+              <td data-value="{{.Fingerprint}}"><code>{{.Fingerprint}}</code>{{if .Label}}<div class="muted">{{.Label}}</div>{{end}}</td>
+              <td data-value="{{.Host}}"><strong>{{.Host}}</strong><div><code>{{.NodeID}}</code></div></td>
+              <td data-value="{{.Status}}"><span class="badge status-{{.Status}}">{{.Status}}</span></td>
+              <td data-value="{{range .Sites}}{{.}} {{end}}"><div class="list">{{range .Sites}}<span class="host-chip">{{.}}</span>{{end}}</div></td>
+              <td data-value="{{len .Networks}}"><div class="list">{{range .Networks}}<code>{{.}}</code>{{end}}</div></td>
+              <td data-value="{{.Signals}}">{{.Signals}}</td>
+              <td data-value="{{.Connections}}">{{.Connections}}</td>
+              <td data-value="{{.Errors}}">{{.Errors}}</td>
+              <td data-value="{{.FirstSeen}}">{{.FirstSeen}}</td>
+            </tr>
+          {{else}}
+            <tr><td colspan="10" class="muted">No correlated web scanner findings in the last 24 hours. Raw abuse signals without a nearby TLS fingerprint are intentionally not shown as candidates.</td></tr>
           {{end}}
           </tbody>
         </table>
