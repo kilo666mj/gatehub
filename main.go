@@ -1893,7 +1893,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     .link-btn:hover { background: #edf7f5; }
     table { width: 100%; border-collapse: separate; border-spacing: 0; }
     th, td { border-bottom: 1px solid var(--line); padding: 10px 10px; text-align: left; vertical-align: top; }
-    th { position: sticky; top: 45px; z-index: 5; font-size: 11px; color: var(--muted); font-weight: 760; text-transform: uppercase; background: #f7f9f9; box-shadow: inset 0 -1px var(--line); }
+    th { position: sticky; top: 0; z-index: 5; font-size: 11px; color: var(--muted); font-weight: 760; text-transform: uppercase; background: #f7f9f9; box-shadow: inset 0 -1px var(--line); }
     th[data-sort] { cursor: pointer; user-select: none; }
     th[data-sort]::after { content: " ↆ"; color: #9aa8a5; font-weight: 700; }
     th[data-dir="asc"]::after { content: " ↑"; color: var(--teal); }
@@ -2030,7 +2030,6 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       .service-legend { justify-content: flex-start; }
       main { padding: 14px 10px 28px; }
       .dashboard-tools { position: static; margin: -14px -10px 0; padding: 8px 10px; align-items: flex-start; }
-      th { top: 0; }
       form.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
