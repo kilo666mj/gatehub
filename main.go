@@ -1813,9 +1813,9 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     .kind-tlsgate::before { background-image: url("/assets/porter-icon-green.png"); }
     .service-ssh::before,
     .kind-sshgate::before { background-image: url("/assets/porter-icon-blue.png"); }
-    h1 { margin: 0; font-size: 24px; letter-spacing: 0; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
     h2 { margin: 0; font-size: 17px; letter-spacing: 0; }
-    main { padding: 24px 28px 44px; display: grid; gap: 26px; }
+    main { padding: 18px 22px 36px; display: grid; gap: 16px; }
     section {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1824,7 +1824,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       overflow: hidden;
     }
     .section-head {
-      padding: 16px 18px;
+      padding: 12px 14px;
       border-bottom: 1px solid var(--line);
       display: flex;
       justify-content: space-between;
@@ -1839,6 +1839,44 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       text-transform: uppercase;
     }
     .section-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .dashboard-tools {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: -18px -22px 0;
+      padding: 8px 22px;
+      background: rgba(245, 247, 248, .96);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(8px);
+    }
+    .section-nav { display: flex; gap: 6px; flex-wrap: wrap; }
+    .section-nav a {
+      padding: 4px 9px;
+      border-radius: 999px;
+      color: #344541;
+      background: #fff;
+      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 680;
+      text-decoration: none;
+    }
+    .section-nav a:hover { color: var(--teal); border-color: var(--teal); }
+    .density-toggle, .collapse-toggle {
+      min-height: 28px;
+      padding: 4px 9px;
+      border-color: var(--line-strong);
+      background: #fff;
+      color: var(--teal);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .density-toggle:hover, .collapse-toggle:hover { background: #edf7f5; }
+    section.is-collapsed > :not(.section-head) { display: none; }
+    section.is-collapsed .section-head { border-bottom: 0; }
     .link-btn {
       display: inline-flex;
       align-items: center;
@@ -1853,14 +1891,16 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       text-decoration: none;
     }
     .link-btn:hover { background: #edf7f5; }
-    table { width: 100%; border-collapse: collapse; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; }
     th, td { border-bottom: 1px solid var(--line); padding: 10px 10px; text-align: left; vertical-align: top; }
-    th { font-size: 11px; color: var(--muted); font-weight: 760; text-transform: uppercase; background: #f7f9f9; }
+    th { position: sticky; top: 45px; z-index: 5; font-size: 11px; color: var(--muted); font-weight: 760; text-transform: uppercase; background: #f7f9f9; box-shadow: inset 0 -1px var(--line); }
     th[data-sort] { cursor: pointer; user-select: none; }
     th[data-sort]::after { content: " ↆ"; color: #9aa8a5; font-weight: 700; }
     th[data-dir="asc"]::after { content: " ↑"; color: var(--teal); }
     th[data-dir="desc"]::after { content: " ↓"; color: var(--teal); }
     tr:hover td { background: #f8fbfb; }
+    tbody tr:nth-child(even) td { background: #fcfdfd; }
+    tbody tr:nth-child(even):hover td { background: #f8fbfb; }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
@@ -1976,11 +2016,21 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     }
     .wrap { overflow-x: auto; }
     .list { display: flex; flex-wrap: wrap; gap: 4px; }
+    body.compact main { gap: 10px; }
+    body.compact .section-head { padding: 8px 11px; }
+    body.compact th, body.compact td { padding: 6px 8px; }
+    body.compact input, body.compact select, body.compact button { min-height: 28px; padding: 4px 7px; }
+    body.compact form.grid { padding: 9px 11px; gap: 7px; }
+    body.compact .badge { min-height: 20px; padding: 1px 6px; }
+    body.compact .host-chip { padding: 1px 5px; }
+    body.compact code { font-size: 11px; }
     @media (max-width: 980px) {
       header { align-items: start; flex-direction: column; }
       .brand { align-items: center; }
       .service-legend { justify-content: flex-start; }
-      main { padding: 18px 14px 34px; }
+      main { padding: 14px 10px 28px; }
+      .dashboard-tools { position: static; margin: -14px -10px 0; padding: 8px 10px; align-items: flex-start; }
+      th { top: 0; }
       form.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
@@ -2003,7 +2053,16 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     </div>
   </header>
   <main>
-    <section>
+    <nav class="dashboard-tools" aria-label="Dashboard controls">
+      <div class="section-nav">
+        <a href="#nodes">Nodes <strong>{{len .Nodes}}</strong></a>
+        <a href="#web-activity">Activity <strong>{{len .WebActivity}}</strong></a>
+        <a href="#web-findings">Findings <strong>{{len .WebCandidates}}</strong></a>
+        <a href="#fingerprints">Fingerprints <strong>{{len .FingerprintGroups}}</strong></a>
+      </div>
+      <button class="density-toggle" id="density-toggle" type="button" aria-pressed="true">Comfortable view</button>
+    </nav>
+    <section id="nodes" data-collapsible>
       <div class="section-head">
         <h2>Nodes</h2>
         <span class="section-count">{{len .Nodes}} registered</span>
@@ -2041,7 +2100,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
         </table>
       </div>
     </section>
-    <section id="web-activity">
+    <section id="web-activity" data-collapsible>
       <div class="section-head">
         <div>
           <h2>Web scanner activity</h2>
@@ -2075,7 +2134,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
         </table>
       </div>
     </section>
-    <section id="web-findings">
+    <section id="web-findings" data-collapsible>
       <div class="section-head">
         <div>
           <h2>Web scanner findings</h2>
@@ -2110,7 +2169,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
         </table>
       </div>
     </section>
-    <section>
+    <section id="fingerprints" data-collapsible>
       <div class="section-head">
         <h2>Fingerprints</h2>
         <span class="section-count">{{len .FingerprintGroups}} signatures across {{.ObservationCount}} observations</span>
@@ -2184,6 +2243,43 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     </section>
   </main>
   <script>
+    const densityToggle = document.getElementById("density-toggle");
+    const savedDensity = localStorage.getItem("gatehub-density") || "compact";
+    document.body.classList.toggle("compact", savedDensity === "compact");
+    function updateDensityButton() {
+      const compact = document.body.classList.contains("compact");
+      densityToggle.textContent = compact ? "Comfortable view" : "Compact view";
+      densityToggle.setAttribute("aria-pressed", String(compact));
+    }
+    updateDensityButton();
+    densityToggle.addEventListener("click", () => {
+      document.body.classList.toggle("compact");
+      localStorage.setItem("gatehub-density", document.body.classList.contains("compact") ? "compact" : "comfortable");
+      updateDensityButton();
+    });
+    document.querySelectorAll("section[data-collapsible]").forEach((section) => {
+      const heading = section.querySelector("h2");
+      const tools = section.querySelector(".section-tools") || section.querySelector(".section-head");
+      const button = document.createElement("button");
+      const storageKey = "gatehub-section-" + section.id;
+      button.type = "button";
+      button.className = "collapse-toggle";
+      button.setAttribute("aria-controls", section.id);
+      function updateSection() {
+        const collapsed = section.classList.contains("is-collapsed");
+        button.textContent = collapsed ? "Show" : "Hide";
+        button.setAttribute("aria-expanded", String(!collapsed));
+        button.setAttribute("aria-label", (collapsed ? "Show " : "Hide ") + heading.textContent);
+      }
+      if (localStorage.getItem(storageKey) === "collapsed") section.classList.add("is-collapsed");
+      button.addEventListener("click", () => {
+        section.classList.toggle("is-collapsed");
+        localStorage.setItem(storageKey, section.classList.contains("is-collapsed") ? "collapsed" : "expanded");
+        updateSection();
+      });
+      tools.appendChild(button);
+      updateSection();
+    });
     const logoutBtn = document.getElementById("logout-btn");
     const csrfToken = document.querySelector("meta[name='csrf-token']")?.content || "";
     if (logoutBtn) {

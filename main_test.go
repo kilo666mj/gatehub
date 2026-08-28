@@ -427,7 +427,10 @@ func TestAdminHomeShowsCorrelatedWebFindings(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET / = %d; body: %s", rec.Code, rec.Body.String())
 	}
-	for _, want := range []string{"Web scanner activity", "Web scanner findings", "t13d_findings_test", "example.com", "192.0.2.0/24", "12"} {
+	for _, want := range []string{
+		"Dashboard controls", "density-toggle", "data-collapsible",
+		"Web scanner activity", "Web scanner findings", "t13d_findings_test", "example.com", "192.0.2.0/24", "12",
+	} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("admin page missing %q", want)
 		}
