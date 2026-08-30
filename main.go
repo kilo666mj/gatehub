@@ -74,11 +74,18 @@ type config struct {
 	AdminOIDCAllowedGroups   string
 	AdminSessionMaxAge       int
 	SightingRetention        time.Duration
+	WebShadowEnabled         bool
+	WebShadowMinNetworks     int
+	WebShadowMinSignals      int
+	WebShadowMinErrorRatio   float64
+	WebShadowRequireScope    bool
+	WebShadowProposedTTL     time.Duration
 }
 
 type app struct {
-	store *Store
-	auth  *AuthService
+	store        *Store
+	auth         *AuthService
+	shadowPolicy WebShadowPolicy
 }
 
 func main() {
@@ -99,7 +106,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("init admin auth: %v", err)
 	}
-	a := &app{store: store, auth: auth}
+	a := &app{store: store, auth: auth, shadowPolicy: cfg.webShadowPolicy()}
 	if _, err := store.PruneSightingsBefore(time.Now().Add(-cfg.SightingRetention)); err != nil {
 		log.Fatalf("prune fingerprint sightings: %v", err)
 	}
@@ -224,9 +231,24 @@ func parseConfig() config {
 	flag.StringVar(&cfg.AdminOIDCAllowedGroups, "admin-oidc-allowed-groups", "", "comma-separated allowlist of group claims")
 	flag.IntVar(&cfg.AdminSessionMaxAge, "admin-session-max-age", 28800, "admin session lifetime in seconds; 0 means no expiry")
 	flag.DurationVar(&cfg.SightingRetention, "sighting-retention", defaultSightingRetention, "how long to retain per-IP fingerprint sightings")
+	flag.BoolVar(&cfg.WebShadowEnabled, "web-shadow-enabled", false, "score correlated web scanner candidates without creating decisions")
+	flag.IntVar(&cfg.WebShadowMinNetworks, "web-shadow-min-networks", 3, "minimum distinct source networks for a shadow block")
+	flag.IntVar(&cfg.WebShadowMinSignals, "web-shadow-min-signals", 3, "minimum distinct abuse signals for a shadow block")
+	flag.Float64Var(&cfg.WebShadowMinErrorRatio, "web-shadow-min-error-ratio", 0.90, "minimum error ratio for a shadow block (0-1)")
+	flag.BoolVar(&cfg.WebShadowRequireScope, "web-shadow-require-multi-scope", true, "require evidence across multiple sites or gate nodes")
+	flag.DurationVar(&cfg.WebShadowProposedTTL, "web-shadow-proposed-ttl", 12*time.Hour, "proposed expiry for shadow blocks")
 	flag.Parse()
 	if cfg.SightingRetention <= 0 {
 		log.Fatalf("--sighting-retention must be positive")
+	}
+	if cfg.WebShadowMinNetworks <= 0 || cfg.WebShadowMinSignals <= 0 {
+		log.Fatalf("web shadow network and signal thresholds must be positive")
+	}
+	if cfg.WebShadowMinErrorRatio < 0 || cfg.WebShadowMinErrorRatio > 1 {
+		log.Fatalf("--web-shadow-min-error-ratio must be between 0 and 1")
+	}
+	if cfg.WebShadowProposedTTL <= 0 {
+		log.Fatalf("--web-shadow-proposed-ttl must be positive")
 	}
 	if cfg.AdminOIDCClientSecret == "" {
 		cfg.AdminOIDCClientSecret = os.Getenv("GATEHUB_ADMIN_OIDC_CLIENT_SECRET")
@@ -252,6 +274,17 @@ func parseConfig() config {
 		log.Fatalf("invalid --admin-auth %q (want oidc or none)", cfg.AdminAuth)
 	}
 	return cfg
+}
+
+func (cfg config) webShadowPolicy() WebShadowPolicy {
+	return WebShadowPolicy{
+		Enabled:           cfg.WebShadowEnabled,
+		MinNetworks:       cfg.WebShadowMinNetworks,
+		MinSignals:        cfg.WebShadowMinSignals,
+		MinErrorRatio:     cfg.WebShadowMinErrorRatio,
+		RequireMultiScope: cfg.WebShadowRequireScope,
+		ProposedTTL:       cfg.WebShadowProposedTTL,
+	}
 }
 
 func startSightingPruner(store *Store, retention time.Duration) {
@@ -405,19 +438,47 @@ type AbuseSignal struct {
 }
 
 type WebCandidate struct {
-	NodeID      string   `json:"node_id"`
-	Host        string   `json:"host"`
-	Fingerprint string   `json:"fingerprint"`
-	Status      string   `json:"status"`
-	Label       string   `json:"label,omitempty"`
-	Networks    []string `json:"networks"`
-	Sites       []string `json:"sites"`
-	Signals     int      `json:"signals"`
-	Connections int      `json:"connections"`
-	Errors      int      `json:"errors"`
-	Successes   int      `json:"successes"`
-	FirstSeen   string   `json:"first_seen"`
-	LastSeen    string   `json:"last_seen"`
+	NodeID            string   `json:"node_id"`
+	Host              string   `json:"host"`
+	Fingerprint       string   `json:"fingerprint"`
+	Status            string   `json:"status"`
+	Label             string   `json:"label,omitempty"`
+	Networks          []string `json:"networks"`
+	Sites             []string `json:"sites"`
+	EvidenceNodes     []string `json:"evidence_nodes,omitempty"`
+	EvidenceSites     []string `json:"evidence_sites,omitempty"`
+	Signals           int      `json:"signals"`
+	Connections       int      `json:"connections"`
+	Errors            int      `json:"errors"`
+	Successes         int      `json:"successes"`
+	ErrorRatio        float64  `json:"error_ratio"`
+	ErrorPercent      float64  `json:"-"`
+	ShadowStatus      string   `json:"shadow_status"`
+	ShadowReasons     []string `json:"shadow_reasons"`
+	ProposedExpiresAt string   `json:"proposed_expires_at,omitempty"`
+	FirstSeen         string   `json:"first_seen"`
+	LastSeen          string   `json:"last_seen"`
+}
+
+type WebShadowPolicy struct {
+	Enabled           bool          `json:"enabled"`
+	MinNetworks       int           `json:"min_networks"`
+	MinSignals        int           `json:"min_signals"`
+	MinErrorRatio     float64       `json:"min_error_ratio"`
+	RequireMultiScope bool          `json:"require_multi_scope"`
+	ProposedTTL       time.Duration `json:"-"`
+}
+
+func (p WebShadowPolicy) MarshalJSON() ([]byte, error) {
+	type policyJSON struct {
+		Enabled           bool    `json:"enabled"`
+		MinNetworks       int     `json:"min_networks"`
+		MinSignals        int     `json:"min_signals"`
+		MinErrorRatio     float64 `json:"min_error_ratio"`
+		RequireMultiScope bool    `json:"require_multi_scope"`
+		ProposedTTL       string  `json:"proposed_ttl"`
+	}
+	return json.Marshal(policyJSON{p.Enabled, p.MinNetworks, p.MinSignals, p.MinErrorRatio, p.RequireMultiScope, p.ProposedTTL.String()})
 }
 
 type WebSignalActivity struct {
@@ -875,6 +936,94 @@ func (s *Store) WebCandidates(since time.Time, window time.Duration) ([]WebCandi
 	return candidates, nil
 }
 
+// ScoreWebCandidates evaluates a report-only policy. It never writes a
+// decision, so its output cannot change the policy returned to gate nodes.
+// Existing manual approvals act as protection overrides and manual blocks are
+// reported as already enforced.
+func ScoreWebCandidates(candidates []WebCandidate, policy WebShadowPolicy, now time.Time) []WebCandidate {
+	type scopeEvidence struct {
+		nodes map[string]struct{}
+		sites map[string]struct{}
+	}
+	byFingerprint := make(map[string]*scopeEvidence)
+	for _, candidate := range candidates {
+		evidence := byFingerprint[candidate.Fingerprint]
+		if evidence == nil {
+			evidence = &scopeEvidence{nodes: make(map[string]struct{}), sites: make(map[string]struct{})}
+			byFingerprint[candidate.Fingerprint] = evidence
+		}
+		evidence.nodes[candidate.NodeID] = struct{}{}
+		for _, site := range candidate.Sites {
+			evidence.sites[site] = struct{}{}
+		}
+	}
+
+	for i := range candidates {
+		candidate := &candidates[i]
+		if candidate.Connections > 0 {
+			candidate.ErrorRatio = float64(candidate.Errors) / float64(candidate.Connections)
+			candidate.ErrorPercent = candidate.ErrorRatio * 100
+		}
+		evidence := byFingerprint[candidate.Fingerprint]
+		for node := range evidence.nodes {
+			candidate.EvidenceNodes = append(candidate.EvidenceNodes, node)
+		}
+		for site := range evidence.sites {
+			candidate.EvidenceSites = append(candidate.EvidenceSites, site)
+		}
+		sort.Strings(candidate.EvidenceNodes)
+		sort.Strings(candidate.EvidenceSites)
+
+		switch {
+		case !policy.Enabled:
+			candidate.ShadowStatus = "disabled"
+			candidate.ShadowReasons = []string{"shadow scoring is disabled"}
+			continue
+		case candidate.Status == decisionApproved:
+			candidate.ShadowStatus = "protected"
+			candidate.ShadowReasons = []string{"manual approval overrides shadow automation"}
+			continue
+		case candidate.Status == decisionBlocked:
+			candidate.ShadowStatus = "already_blocked"
+			candidate.ShadowReasons = []string{"an existing manual block already applies"}
+			continue
+		}
+
+		eligible := true
+		if len(candidate.Networks) < policy.MinNetworks {
+			eligible = false
+			candidate.ShadowReasons = append(candidate.ShadowReasons, fmt.Sprintf("needs %d networks; observed %d", policy.MinNetworks, len(candidate.Networks)))
+		} else {
+			candidate.ShadowReasons = append(candidate.ShadowReasons, fmt.Sprintf("%d networks meets minimum %d", len(candidate.Networks), policy.MinNetworks))
+		}
+		if candidate.Signals < policy.MinSignals {
+			eligible = false
+			candidate.ShadowReasons = append(candidate.ShadowReasons, fmt.Sprintf("needs %d signals; observed %d", policy.MinSignals, candidate.Signals))
+		} else {
+			candidate.ShadowReasons = append(candidate.ShadowReasons, fmt.Sprintf("%d signals meets minimum %d", candidate.Signals, policy.MinSignals))
+		}
+		if candidate.ErrorRatio < policy.MinErrorRatio {
+			eligible = false
+			candidate.ShadowReasons = append(candidate.ShadowReasons, fmt.Sprintf("error ratio %.1f%% is below %.1f%%", candidate.ErrorRatio*100, policy.MinErrorRatio*100))
+		} else {
+			candidate.ShadowReasons = append(candidate.ShadowReasons, fmt.Sprintf("error ratio %.1f%% meets minimum %.1f%%", candidate.ErrorRatio*100, policy.MinErrorRatio*100))
+		}
+		if policy.RequireMultiScope && len(evidence.nodes) < 2 && len(evidence.sites) < 2 {
+			eligible = false
+			candidate.ShadowReasons = append(candidate.ShadowReasons, "needs evidence from multiple sites or gate nodes")
+		} else if policy.RequireMultiScope {
+			candidate.ShadowReasons = append(candidate.ShadowReasons, fmt.Sprintf("evidence spans %d sites and %d gate nodes", len(evidence.sites), len(evidence.nodes)))
+		}
+		if eligible {
+			candidate.ShadowStatus = "would_block"
+			candidate.ProposedExpiresAt = now.Add(policy.ProposedTTL).UTC().Format(time.RFC3339)
+		} else {
+			candidate.ShadowStatus = "insufficient_evidence"
+		}
+	}
+	return candidates
+}
+
 func sourceNetwork(ip string) string {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
@@ -1287,6 +1436,7 @@ func (a *app) handleAdminHome(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	candidates = ScoreWebCandidates(candidates, a.shadowPolicy, time.Now())
 	activity, err := a.store.WebSignalActivity(time.Now().Add(-24 * time.Hour))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -1297,11 +1447,12 @@ func (a *app) handleAdminHome(w http.ResponseWriter, r *http.Request) {
 		FingerprintGroups []FingerprintGroup
 		WebCandidates     []WebCandidate
 		WebActivity       []WebSignalActivity
+		ShadowPolicy      WebShadowPolicy
 		ObservationCount  int
 		Statuses          []string
 		AuthEnabled       bool
 		CSRFToken         string
-	}{nodes, fingerprintGroups, candidates, activity, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
+	}{nodes, fingerprintGroups, candidates, activity, a.shadowPolicy, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
 	if err := adminTemplate.Execute(w, data); err != nil {
 		log.Printf("render admin: %v", err)
 	}
@@ -1501,7 +1652,8 @@ func (a *app) handleAdminWebCandidatesAPI(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"mode": "report_only", "candidates": candidates})
+	candidates = ScoreWebCandidates(candidates, a.shadowPolicy, time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{"mode": "shadow", "policy": a.shadowPolicy, "candidates": candidates})
 }
 
 func validateNode(n Node) error {
@@ -1957,6 +2109,9 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
     .status-approved, .status-active { color: var(--green); }
     .status-blocked, .status-revoked { color: var(--red); }
     .status-pending, .status-disabled { color: var(--amber); }
+    .status-would_block, .status-already_blocked { color: var(--red); }
+    .status-protected { color: var(--green); }
+    .status-insufficient_evidence { color: var(--amber); }
     .kind { display: inline-flex; align-items: center; gap: 6px; font-weight: 760; }
     .kind::before { width: 20px; height: 14px; border-radius: 3px; }
     .kind-tlsgate { color: var(--green); }
@@ -2137,32 +2292,34 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       <div class="section-head">
         <div>
           <h2>Web scanner findings</h2>
-          <span class="muted">HTTP abuse signals correlated with a TLS fingerprint on the same host within five minutes</span>
+          <span class="muted">HTTP abuse signals correlated with a TLS fingerprint on the same host within five minutes; shadow scoring never creates decisions</span>
         </div>
         <div class="section-tools">
-          <span class="section-count">{{len .WebCandidates}} candidates · last 24 hours · report only</span>
+          <span class="section-count">{{len .WebCandidates}} candidates · last 24 hours · {{if .ShadowPolicy.Enabled}}shadow policy active{{else}}shadow policy disabled{{end}}</span>
           <a class="link-btn" href="/#web-findings">Refresh</a>
         </div>
       </div>
       <div class="wrap">
         <table>
-          <thead><tr><th data-sort="text">Last seen</th><th data-sort="text">TLS fingerprint</th><th data-sort="text">Gate</th><th data-sort="status">Status</th><th data-sort="text">Sites</th><th data-sort="number">Networks</th><th data-sort="number">Signals</th><th data-sort="number">Requests</th><th data-sort="number">Errors</th><th data-sort="text">First seen</th></tr></thead>
+          <thead><tr><th data-sort="text">Last seen</th><th data-sort="text">TLS fingerprint</th><th data-sort="text">Gate</th><th data-sort="status">Shadow result</th><th data-sort="status">Decision</th><th data-sort="text">Sites</th><th data-sort="number">Networks</th><th data-sort="number">Signals</th><th data-sort="number">Error rate</th><th data-sort="number">Requests</th><th data-sort="text">Proposed expiry</th><th data-sort="text">First seen</th></tr></thead>
           <tbody>
           {{range .WebCandidates}}
             <tr>
               <td data-value="{{.LastSeen}}">{{.LastSeen}}</td>
               <td data-value="{{.Fingerprint}}"><code>{{.Fingerprint}}</code>{{if .Label}}<div class="muted">{{.Label}}</div>{{end}}</td>
               <td data-value="{{.Host}}"><strong>{{.Host}}</strong><div><code>{{.NodeID}}</code></div></td>
+              <td data-value="{{.ShadowStatus}}"><span class="badge status-{{.ShadowStatus}}">{{.ShadowStatus}}</span><div class="muted">{{range .ShadowReasons}}{{.}}<br>{{end}}</div></td>
               <td data-value="{{.Status}}"><span class="badge status-{{.Status}}">{{.Status}}</span></td>
               <td data-value="{{range .Sites}}{{.}} {{end}}"><div class="list">{{range .Sites}}<span class="host-chip">{{.}}</span>{{end}}</div></td>
               <td data-value="{{len .Networks}}"><div class="list">{{range .Networks}}<code>{{.}}</code>{{end}}</div></td>
               <td data-value="{{.Signals}}">{{.Signals}}</td>
+              <td data-value="{{.ErrorRatio}}">{{printf "%.1f%%" .ErrorPercent}}</td>
               <td data-value="{{.Connections}}">{{.Connections}}</td>
-              <td data-value="{{.Errors}}">{{.Errors}}</td>
+              <td data-value="{{.ProposedExpiresAt}}">{{if .ProposedExpiresAt}}{{.ProposedExpiresAt}}{{else}}—{{end}}</td>
               <td data-value="{{.FirstSeen}}">{{.FirstSeen}}</td>
             </tr>
           {{else}}
-            <tr><td colspan="10" class="muted">No correlated web scanner findings in the last 24 hours. Raw abuse signals without a nearby TLS fingerprint are intentionally not shown as candidates.</td></tr>
+            <tr><td colspan="12" class="muted">No correlated web scanner findings in the last 24 hours. Raw abuse signals without a nearby TLS fingerprint are intentionally not shown as candidates.</td></tr>
           {{end}}
           </tbody>
         </table>

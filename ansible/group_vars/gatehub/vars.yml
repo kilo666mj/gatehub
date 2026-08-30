@@ -40,6 +40,15 @@ gatehub_client_ca: "{{ gatehub_config_dir }}/client-ca.crt"
 gatehub_client_crl: ""
 gatehub_sighting_retention: 192h
 
+# Report-only web scanner scoring. This never creates or distributes a block.
+# Enable it per deployment after reviewing the thresholds against local data.
+gatehub_web_shadow_enabled: false
+gatehub_web_shadow_min_networks: 3
+gatehub_web_shadow_min_signals: 3
+gatehub_web_shadow_min_error_ratio: 0.90
+gatehub_web_shadow_require_multi_scope: true
+gatehub_web_shadow_proposed_ttl: 12h
+
 # If true, create a self-signed server certificate on the target when
 # gatehub_public_cert/gatehub_public_key are missing. Gate clients should trust
 # this certificate via their control_plane.ca setting.

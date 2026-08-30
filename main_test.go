@@ -187,6 +187,45 @@ func TestWebCandidatesRequireSameHostAndNearbySighting(t *testing.T) {
 	}
 }
 
+func TestScoreWebCandidatesShadowPolicy(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	policy := WebShadowPolicy{
+		Enabled: true, MinNetworks: 3, MinSignals: 3, MinErrorRatio: 0.90,
+		RequireMultiScope: true, ProposedTTL: 12 * time.Hour,
+	}
+	candidates := []WebCandidate{
+		{
+			NodeID: "gate-a", Fingerprint: "shared", Status: decisionPending,
+			Networks: []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"},
+			Sites:    []string{"site-a"}, Signals: 4, Connections: 40, Errors: 38,
+		},
+		{
+			NodeID: "gate-b", Fingerprint: "shared", Status: decisionPending,
+			Networks: []string{"2001:db8::/64"}, Sites: []string{"site-b"},
+			Signals: 1, Connections: 10, Errors: 10,
+		},
+		{
+			NodeID: "gate-a", Fingerprint: "protected", Status: decisionApproved,
+			Networks: []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"},
+			Sites:    []string{"site-a", "site-b"}, Signals: 4, Connections: 40, Errors: 40,
+		},
+	}
+
+	got := ScoreWebCandidates(candidates, policy, now)
+	if got[0].ShadowStatus != "would_block" || got[0].ProposedExpiresAt != "2026-08-31T00:00:00Z" {
+		t.Fatalf("eligible candidate = %+v", got[0])
+	}
+	if got[0].ErrorRatio != 0.95 || len(got[0].EvidenceNodes) != 2 || len(got[0].EvidenceSites) != 2 {
+		t.Fatalf("eligible evidence = %+v", got[0])
+	}
+	if got[1].ShadowStatus != "insufficient_evidence" || got[1].ProposedExpiresAt != "" {
+		t.Fatalf("weak candidate = %+v", got[1])
+	}
+	if got[2].ShadowStatus != "protected" || got[2].ProposedExpiresAt != "" {
+		t.Fatalf("protected candidate = %+v", got[2])
+	}
+}
+
 func TestWebSignalActivityIncludesUncorrelatedSignals(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
@@ -421,7 +460,10 @@ func TestAdminHomeShowsCorrelatedWebFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := app{store: store, auth: &AuthService{}}
+	a := app{
+		store: store, auth: &AuthService{},
+		shadowPolicy: WebShadowPolicy{Enabled: true, MinNetworks: 1, MinSignals: 1, MinErrorRatio: 0.80, ProposedTTL: 12 * time.Hour},
+	}
 	rec := httptest.NewRecorder()
 	a.handleAdminHome(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK {
@@ -429,7 +471,7 @@ func TestAdminHomeShowsCorrelatedWebFindings(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Dashboard controls", "density-toggle", "data-collapsible",
-		"Web scanner activity", "Web scanner findings", "t13d_findings_test", "example.com", "192.0.2.0/24", "12",
+		"Web scanner activity", "Web scanner findings", "t13d_findings_test", "example.com", "192.0.2.0/24", "12", "would_block", "83.3%",
 	} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("admin page missing %q", want)

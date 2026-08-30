@@ -88,5 +88,15 @@ values can contain credentials and personal data:
 
 The authenticated admin endpoint `GET /api/web-candidates` correlates signals
 with TLS sightings from the same host within five minutes and returns
-report-only candidates grouped by gate instance and fingerprint. It never
-creates a decision. Optional `window` (maximum `30m`) and RFC3339 `since`
+report-only candidates grouped by gate instance and fingerprint. When the
+shadow policy is enabled, each candidate also includes `shadow_status`,
+`shadow_reasons`, the measured `error_ratio`, cross-site/node evidence, and a
+proposed expiry. `would_block` is simulation output only: this endpoint never
+creates a decision and shadow results are never returned to gate nodes.
+
+An existing manual `approved` decision protects the matching fingerprint from
+shadow automation; an existing manual `blocked` decision is reported as
+`already_blocked`. Configure scoring with `--web-shadow-enabled`,
+`--web-shadow-min-networks`, `--web-shadow-min-signals`,
+`--web-shadow-min-error-ratio`, `--web-shadow-require-multi-scope`, and
+`--web-shadow-proposed-ttl`. Optional `window` (maximum `30m`) and RFC3339 `since`
