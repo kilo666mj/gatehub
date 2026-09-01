@@ -89,29 +89,32 @@ type app struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (err error) {
 	if len(os.Args) > 1 && os.Args[1] == "register-node" {
-		if err := registerNode(os.Args[2:], os.Stdin, os.Stdout); err != nil {
-			log.Fatal(err)
-		}
-		return
+		return registerNode(os.Args[2:], os.Stdin, os.Stdout)
 	}
 	cfg := parseConfig()
 	store, err := NewStore(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		return fmt.Errorf("open database: %w", err)
 	}
-	defer store.Close()
+	defer closeWithError(&err, "close database", store.Close)
 
 	auth, err := newAuthService(cfg, store.db)
 	if err != nil {
-		log.Fatalf("init admin auth: %v", err)
+		return fmt.Errorf("init admin auth: %w", err)
 	}
 	a := &app{store: store, auth: auth, shadowPolicy: cfg.webShadowPolicy()}
 	if _, err := store.PruneSightingsBefore(time.Now().Add(-cfg.SightingRetention)); err != nil {
-		log.Fatalf("prune fingerprint sightings: %v", err)
+		return fmt.Errorf("prune fingerprint sightings: %w", err)
 	}
 	if _, err := store.PruneAbuseSignalsBefore(time.Now().Add(-cfg.SightingRetention)); err != nil {
-		log.Fatalf("prune web abuse signals: %v", err)
+		return fmt.Errorf("prune web abuse signals: %w", err)
 	}
 	go startSightingPruner(store, cfg.SightingRetention)
 	errCh := make(chan error, 2)
@@ -123,10 +126,10 @@ func main() {
 	}
 	if cfg.PublicListen != "" {
 		if cfg.PublicAuth != "token" && (cfg.PublicCert == "" || cfg.PublicKey == "") {
-			log.Fatalf("public auth mode %q requires --public-cert and --public-key", cfg.PublicAuth)
+			return fmt.Errorf("public auth mode %q requires --public-cert and --public-key", cfg.PublicAuth)
 		}
 		if (cfg.PublicAuth == "mtls" || cfg.PublicAuth == "both") && cfg.ClientCA == "" {
-			log.Fatalf("public auth mode %q requires --client-ca", cfg.PublicAuth)
+			return fmt.Errorf("public auth mode %q requires --client-ca", cfg.PublicAuth)
 		}
 		if cfg.PublicCert == "" && cfg.PublicKey == "" {
 			go func() {
@@ -136,7 +139,7 @@ func main() {
 		} else {
 			tlsCfg, err := loadPublicTLSConfig(cfg)
 			if err != nil {
-				log.Fatalf("load public TLS config: %v", err)
+				return fmt.Errorf("load public TLS config: %w", err)
 			}
 			srv := &http.Server{
 				Addr:      cfg.PublicListen,
@@ -150,14 +153,15 @@ func main() {
 		}
 	}
 	if cfg.AdminListen == "" && cfg.PublicListen == "" {
-		log.Fatal("nothing to listen on; set --admin-listen and/or --public-listen")
+		return errors.New("nothing to listen on; set --admin-listen and/or --public-listen")
 	}
 	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+		return err
 	}
+	return nil
 }
 
-func registerNode(args []string, stdin io.Reader, stdout io.Writer) error {
+func registerNode(args []string, stdin io.Reader, stdout io.Writer) (err error) {
 	fs := flag.NewFlagSet("register-node", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var dbPath, id, kind, host, allowedCertName, tokenFile string
@@ -177,7 +181,6 @@ func registerNode(args []string, stdin io.Reader, stdout io.Writer) error {
 		return errors.New("--token-file is required (use - for standard input)")
 	}
 	var tokenBytes []byte
-	var err error
 	if tokenFile == "-" {
 		tokenBytes, err = io.ReadAll(io.LimitReader(stdin, maxNodeTokenLength+2))
 	} else {
@@ -194,7 +197,7 @@ func registerNode(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
-	defer store.Close()
+	defer closeWithError(&err, "close database", store.Close)
 	node := Node{
 		ID:              strings.TrimSpace(id),
 		Kind:            strings.TrimSpace(kind),
@@ -529,8 +532,7 @@ func NewStore(path string) (*Store, error) {
 	db.SetMaxIdleConns(1)
 	s := &Store{db: db}
 	if err := s.init(); err != nil {
-		db.Close()
-		return nil, err
+		return nil, errors.Join(err, closeError("close database after failed initialization", db.Close))
 	}
 	return s, nil
 }
@@ -631,12 +633,12 @@ func (s *Store) init() error {
 	return nil
 }
 
-func addColumnIfMissing(db *sql.DB, table, column, def string) error {
+func addColumnIfMissing(db *sql.DB, table, column, def string) (err error) {
 	rows, err := db.QueryContext(context.Background(), fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer closeWithError(&err, "close schema rows", rows.Close)
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, ctype string
@@ -701,14 +703,14 @@ func (s *Store) Node(id string) (Node, error) {
 	return n, err
 }
 
-func (s *Store) Nodes() ([]Node, error) {
+func (s *Store) Nodes() (_ []Node, err error) {
 	rows, err := s.db.Query(`
 		SELECT id, kind, host, allowed_cert_name, token_hash, status, last_seen, created_at
 		FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeWithError(&err, "close node rows", rows.Close)
 	var nodes []Node
 	for rows.Next() {
 		var n Node
@@ -720,12 +722,12 @@ func (s *Store) Nodes() ([]Node, error) {
 	return nodes, rows.Err()
 }
 
-func (s *Store) UpsertObservations(node Node, observations []Fingerprint) error {
+func (s *Store) UpsertObservations(node Node, observations []Fingerprint) (err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTransaction(tx, &err)
 	now := nowString()
 	for _, fp := range observations {
 		if err := validateObservation(fp); err != nil {
@@ -783,7 +785,7 @@ func (s *Store) UpsertObservations(node Node, observations []Fingerprint) error 
 	return tx.Commit()
 }
 
-func (s *Store) Fingerprints(status string) ([]Fingerprint, error) {
+func (s *Store) Fingerprints(status string) (_ []Fingerprint, err error) {
 	query := `
 		SELECT node_id, fingerprint, kind, host, status, label, first_seen, last_seen,
 			ips_json, ports_json, count, metadata_json, updated_at
@@ -798,7 +800,7 @@ func (s *Store) Fingerprints(status string) ([]Fingerprint, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeWithError(&err, "close fingerprint rows", rows.Close)
 	var fps []Fingerprint
 	for rows.Next() {
 		fp, err := scanFingerprint(rows)
@@ -820,12 +822,12 @@ func (s *Store) PruneSightingsBefore(cutoff time.Time) (int64, error) {
 	return res.RowsAffected()
 }
 
-func (s *Store) UpsertAbuseSignals(node Node, signals []AbuseSignal) error {
+func (s *Store) UpsertAbuseSignals(node Node, signals []AbuseSignal) (err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTransaction(tx, &err)
 	receivedAt := nowString()
 	for _, signal := range signals {
 		if err := validateAbuseSignal(signal); err != nil {
@@ -856,7 +858,7 @@ func (s *Store) PruneAbuseSignalsBefore(cutoff time.Time) (int64, error) {
 
 // WebCandidates correlates signals only with TLS sightings on the same host
 // and within window. It is report-only and never creates a policy decision.
-func (s *Store) WebCandidates(since time.Time, window time.Duration) ([]WebCandidate, error) {
+func (s *Store) WebCandidates(since time.Time, window time.Duration) (_ []WebCandidate, err error) {
 	rows, err := s.db.Query(`
 		SELECT f.node_id, f.host, f.fingerprint, f.status, f.label,
 			sig.event_id, sig.site, sig.ip, sig.observed_at,
@@ -872,7 +874,7 @@ func (s *Store) WebCandidates(since time.Time, window time.Duration) ([]WebCandi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeWithError(&err, "close web candidate rows", rows.Close)
 	type aggregate struct {
 		candidate WebCandidate
 		events    map[string]struct{}
@@ -1039,7 +1041,7 @@ func sourceNetwork(ip string) string {
 // WebSignalActivity reports accepted aggregate HTTP abuse signals without
 // implying that they are safe enforcement candidates. IPs are reduced to
 // source networks to match the privacy-limited candidate view.
-func (s *Store) WebSignalActivity(since time.Time) ([]WebSignalActivity, error) {
+func (s *Store) WebSignalActivity(since time.Time) (_ []WebSignalActivity, err error) {
 	rows, err := s.db.Query(`
 		SELECT node_id, host, site, ip, trigger, COUNT(*),
 			SUM(connections), SUM(errors), SUM(successes),
@@ -1051,7 +1053,7 @@ func (s *Store) WebSignalActivity(since time.Time) ([]WebSignalActivity, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeWithError(&err, "close web activity rows", rows.Close)
 	var activity []WebSignalActivity
 	for rows.Next() {
 		var item WebSignalActivity
@@ -1067,7 +1069,7 @@ func (s *Store) WebSignalActivity(since time.Time) ([]WebSignalActivity, error) 
 	return activity, rows.Err()
 }
 
-func (s *Store) CreateDecision(d Decision) error {
+func (s *Store) CreateDecision(d Decision) (err error) {
 	if err := validateDecision(d); err != nil {
 		return err
 	}
@@ -1079,7 +1081,7 @@ func (s *Store) CreateDecision(d Decision) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTransaction(tx, &err)
 	if _, err := tx.Exec(`
 		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1119,7 +1121,7 @@ func (s *Store) CreateDecision(d Decision) error {
 	return tx.Commit()
 }
 
-func (s *Store) PolicyForNode(node Node, since string) ([]Decision, string, error) {
+func (s *Store) PolicyForNode(node Node, since string) (_ []Decision, _ string, err error) {
 	query := `
 		SELECT id, scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor
 		FROM decisions
@@ -1134,7 +1136,7 @@ func (s *Store) PolicyForNode(node Node, since string) ([]Decision, string, erro
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer closeWithError(&err, "close policy rows", rows.Close)
 	var decisions []Decision
 	cursor := since
 	for rows.Next() {
@@ -1227,14 +1229,16 @@ func serveAsset(name, contentType string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "public, max-age=86400")
-		w.Write(data)
+		if _, err := w.Write(data); err != nil {
+			log.Printf("write asset %s: %v", name, err)
+		}
 	}
 }
 
 func serveManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/manifest+json")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	w.Write([]byte(`{
+	if _, err := w.Write([]byte(`{
   "name": "gatehub",
   "short_name": "gatehub",
   "description": "Gatehub fingerprint control plane",
@@ -1255,7 +1259,9 @@ func serveManifest(w http.ResponseWriter, r *http.Request) {
       "type": "image/png"
     }
   ]
-}`))
+}`)); err != nil {
+		log.Printf("write web manifest: %v", err)
+	}
 }
 
 type observationBatchRequest struct {
@@ -1813,8 +1819,8 @@ func decodeJSON(s string, v any) error {
 	return json.Unmarshal([]byte(s), v)
 }
 
-func readJSON(r *http.Request, v any) error {
-	defer r.Body.Close()
+func readJSON(r *http.Request, v any) (err error) {
+	defer closeWithError(&err, "close request body", r.Body.Close)
 	body := http.MaxBytesReader(nil, r.Body, 2<<20)
 	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields()
@@ -1825,6 +1831,23 @@ func readJSON(r *http.Request, v any) error {
 		return errors.New("request body must contain one JSON object")
 	}
 	return nil
+}
+
+func closeError(context string, closeFn func() error) error {
+	if err := closeFn(); err != nil {
+		return fmt.Errorf("%s: %w", context, err)
+	}
+	return nil
+}
+
+func closeWithError(errp *error, context string, closeFn func() error) {
+	*errp = errors.Join(*errp, closeError(context, closeFn))
+}
+
+func rollbackTransaction(tx *sql.Tx, errp *error) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		*errp = errors.Join(*errp, fmt.Errorf("rollback transaction: %w", err))
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

@@ -14,7 +14,11 @@ func newTestAuth(t *testing.T, mode string) *AuthService {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	cfg := config{
 		AdminAuth:            mode,
 		AdminOIDCIssuer:      "https://pocket-id.example.com",

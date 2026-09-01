@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,12 +14,29 @@ import (
 	"time"
 )
 
+func closeTestStore(t *testing.T, store *Store) {
+	t.Helper()
+	if err := store.Close(); err != nil {
+		t.Errorf("close store: %v", err)
+	}
+}
+
+func TestCloseWithErrorPreservesPrimaryError(t *testing.T) {
+	primaryErr := errors.New("primary")
+	closeErr := errors.New("close")
+	err := error(primaryErr)
+	closeWithError(&err, "close resource", func() error { return closeErr })
+	if !errors.Is(err, primaryErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("closeWithError() error = %v, want primary and close errors", err)
+	}
+}
+
 func TestStoreObservationDecisionPolicy(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 
 	node := Node{ID: "mail-tls", Kind: "tlsgate", Host: "mail-gateway", AllowedCertName: "mail-gateway", Status: statusActive}
 	if err := store.UpsertNode(node); err != nil {
@@ -81,7 +99,7 @@ func TestPruneSightingsBefore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 	node := Node{ID: "web-tls", Kind: "tlsgate", Host: "web", AllowedCertName: "web", Status: statusActive}
 	if err := store.UpsertNode(node); err != nil {
 		t.Fatal(err)
@@ -116,7 +134,7 @@ func TestUpsertAbuseSignalsDeduplicatesAndPrunes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 	node := Node{ID: "logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
 	if err := store.UpsertNode(node); err != nil {
 		t.Fatal(err)
@@ -158,7 +176,7 @@ func TestWebCandidatesRequireSameHostAndNearbySighting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 	tlsNode := Node{ID: "web-tls", Kind: "tlsgate", Host: "web.example.com", AllowedCertName: "web", Status: statusActive}
 	logNode := Node{ID: "logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
 	for _, node := range []Node{tlsNode, logNode} {
@@ -231,7 +249,7 @@ func TestWebSignalActivityIncludesUncorrelatedSignals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 	node := Node{ID: "central-logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
 	if err := store.UpsertNode(node); err != nil {
 		t.Fatal(err)
@@ -256,7 +274,7 @@ func TestObservationDoesNotOverrideDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 
 	node := Node{ID: "mail-tls", Kind: "tlsgate", Host: "mail-gateway", AllowedCertName: "mail-gateway", Status: statusActive}
 	if err := store.UpsertNode(node); err != nil {
@@ -294,7 +312,7 @@ func TestGlobalDecisionUpdatesMatchingFingerprintsAndPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 
 	nodes := []Node{
 		{ID: "mail-tls", Kind: "tlsgate", Host: "mail-gateway", AllowedCertName: "mail-gateway", Status: statusActive},
@@ -409,7 +427,7 @@ func TestAdminGlobalDecisionClearsInstanceScopeID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 
 	a := app{store: store, auth: &AuthService{}}
 	req := httptest.NewRequest(http.MethodPost, "/decisions", strings.NewReader(
@@ -436,7 +454,7 @@ func TestAdminHomeShowsCorrelatedWebFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 
 	tlsNode := Node{ID: "web-tls", Kind: "tlsgate", Host: "web.example.com", AllowedCertName: "web", Status: statusActive}
 	logNode := Node{ID: "central-logs", Kind: "log_watcher", Host: "logs", AllowedCertName: "logs", Status: statusActive}
@@ -484,7 +502,7 @@ func TestUpsertNodeDoesNotReactivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 
 	node := Node{ID: "node-a", Kind: "tlsgate", Host: "node-a", AllowedCertName: "node-a", Status: statusActive}
 	if err := store.UpsertNode(node); err != nil {
@@ -558,7 +576,7 @@ func TestRegisterNodeReadsTokenFromStdinWithoutEchoingIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer closeTestStore(t, store)
 	node, err := store.Node("logs-central")
 	if err != nil {
 		t.Fatalf("Node: %v", err)
