@@ -80,12 +80,18 @@ type config struct {
 	WebShadowMinErrorRatio   float64
 	WebShadowRequireScope    bool
 	WebShadowProposedTTL     time.Duration
+	TrustedHomeIPv4URLs      string
+	TrustedHomeIPv6Prefix    int
+	TrustedDNSNames          string
+	TrustedSourceRefresh     time.Duration
+	TrustedSourceGrace       time.Duration
 }
 
 type app struct {
-	store        *Store
-	auth         *AuthService
-	shadowPolicy WebShadowPolicy
+	store          *Store
+	auth           *AuthService
+	shadowPolicy   WebShadowPolicy
+	trustedSources *trustedSourceManager
 }
 
 func main() {
@@ -109,7 +115,11 @@ func run() (err error) {
 	if err != nil {
 		return fmt.Errorf("init admin auth: %w", err)
 	}
-	a := &app{store: store, auth: auth, shadowPolicy: cfg.webShadowPolicy()}
+	trustedSources := newTrustedSourceManager(cfg)
+	a := &app{store: store, auth: auth, shadowPolicy: cfg.webShadowPolicy(), trustedSources: trustedSources}
+	if trustedSources != nil {
+		trustedSources.Start(context.Background())
+	}
 	if _, err := store.PruneSightingsBefore(time.Now().Add(-cfg.SightingRetention)); err != nil {
 		return fmt.Errorf("prune fingerprint sightings: %w", err)
 	}
@@ -240,6 +250,11 @@ func parseConfig() config {
 	flag.Float64Var(&cfg.WebShadowMinErrorRatio, "web-shadow-min-error-ratio", 0.90, "minimum error ratio for a shadow block (0-1)")
 	flag.BoolVar(&cfg.WebShadowRequireScope, "web-shadow-require-multi-scope", true, "require evidence across multiple sites or gate nodes")
 	flag.DurationVar(&cfg.WebShadowProposedTTL, "web-shadow-proposed-ttl", 12*time.Hour, "proposed expiry for shadow blocks")
+	flag.StringVar(&cfg.TrustedHomeIPv4URLs, "trusted-home-ipv4-urls", "", "comma-separated HTTPS endpoints that must agree on the home public IPv4")
+	flag.IntVar(&cfg.TrustedHomeIPv6Prefix, "trusted-home-ipv6-prefix", 0, "trust public interface IPv6 addresses masked to this prefix length; 0 disables")
+	flag.StringVar(&cfg.TrustedDNSNames, "trusted-dns-names", "", "comma-separated names whose public addresses are trusted")
+	flag.DurationVar(&cfg.TrustedSourceRefresh, "trusted-source-refresh", time.Minute, "trusted source discovery interval")
+	flag.DurationVar(&cfg.TrustedSourceGrace, "trusted-source-grace", 5*time.Minute, "maximum lifetime of a trusted source after its last successful refresh")
 	flag.Parse()
 	if cfg.SightingRetention <= 0 {
 		log.Fatalf("--sighting-retention must be positive")
@@ -252,6 +267,17 @@ func parseConfig() config {
 	}
 	if cfg.WebShadowProposedTTL <= 0 {
 		log.Fatalf("--web-shadow-proposed-ttl must be positive")
+	}
+	if cfg.TrustedHomeIPv6Prefix < 0 || cfg.TrustedHomeIPv6Prefix > 128 {
+		log.Fatalf("--trusted-home-ipv6-prefix must be 0 or between 1 and 128")
+	}
+	if cfg.TrustedSourceRefresh <= 0 || cfg.TrustedSourceGrace < cfg.TrustedSourceRefresh {
+		log.Fatalf("trusted source grace must be at least one positive refresh interval")
+	}
+	for _, endpoint := range splitCSV(cfg.TrustedHomeIPv4URLs) {
+		if !strings.HasPrefix(endpoint, "https://") {
+			log.Fatalf("trusted home IPv4 reflector must use HTTPS: %s", endpoint)
+		}
 	}
 	if cfg.AdminOIDCClientSecret == "" {
 		cfg.AdminOIDCClientSecret = os.Getenv("GATEHUB_ADMIN_OIDC_CLIENT_SECRET")
@@ -1340,7 +1366,11 @@ func (a *app) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cursor": cursor, "decisions": decisions})
+	response := map[string]any{"cursor": cursor, "decisions": decisions}
+	if a.trustedSources != nil {
+		response["trusted_ranges"] = a.trustedSources.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *app) authorizeNode(w http.ResponseWriter, r *http.Request, instanceID string) (Node, bool) {

@@ -63,6 +63,12 @@ GET /v1/policy?instance_id=mail-tls&since=2026-07-01T10:00:00Z
 }
 ```
 
+When trusted-source discovery is configured, policy responses also contain a
+`trusted_ranges` array of CIDR strings. Gates atomically replace only their
+control-plane-managed bypasses with this list; locally configured static ranges
+remain in force. Gatehub omits the field when discovery is disabled so an older
+deployment cannot accidentally clear local state.
+
 Web signal nodes registered with kind `log_watcher` may upload aggregate
 scanner evidence to `POST /v1/signals/batch?instance_id=<id>`. The schema
 intentionally has no raw request-target or user-agent field because access-log

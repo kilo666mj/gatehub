@@ -49,6 +49,14 @@ gatehub_web_shadow_min_error_ratio: 0.90
 gatehub_web_shadow_require_multi_scope: true
 gatehub_web_shadow_proposed_ttl: 12h
 
+# Optional expiring trusted-source discovery. Keep real DNS names in ignored
+# host vars. Multiple HTTPS reflectors must agree before IPv4 trust changes.
+gatehub_trusted_home_ipv4_urls: ""
+gatehub_trusted_home_ipv6_prefix: 0
+gatehub_trusted_dns_names: ""
+gatehub_trusted_source_refresh: 1m
+gatehub_trusted_source_grace: 5m
+
 # If true, create a self-signed server certificate on the target when
 # gatehub_public_cert/gatehub_public_key are missing. Gate clients should trust
 # this certificate via their control_plane.ca setting.
