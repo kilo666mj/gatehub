@@ -6,6 +6,10 @@ name: notify main failure
 
 on:
   workflow_run:
+    # workflow_run requires an explicit list; it has no "all workflows" form.
+    # These are this repository's own committed workflows. CodeQL default setup
+    # is a dynamic workflow and cannot be named here.
+    workflows: [build]
     branches: [main]
     types: [completed]
 
