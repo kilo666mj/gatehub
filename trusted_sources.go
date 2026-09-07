@@ -144,7 +144,7 @@ func (m *trustedSourceManager) discoverPublicIPv4(ctx context.Context) ([]string
 			continue
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 128))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		addr, parseErr := netip.ParseAddr(strings.TrimSpace(string(body)))
 		if readErr == nil && parseErr == nil && resp.StatusCode/100 == 2 && addr.Is4() && addr.IsGlobalUnicast() && !addr.IsPrivate() {
 			votes[addr]++
