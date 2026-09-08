@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -189,5 +190,43 @@ func TestSMTPReportTLSGateWireContract(t *testing.T) {
 	}
 	if len(reports) != 1 || reports[0].Summary.Records[0].ConnectionID != "c1" || reports[0].Summary.UnknownTransportMessages != 0 {
 		t.Fatalf("wire report did not round-trip: %+v", reports)
+	}
+}
+
+// The fixture is emitted by TLSGate readSMTPReport. Do not recompute its
+// replay ID here: doing so would hide client/server serialization drift.
+func TestSMTPReportClientGoldenUsesClientReplayHash(t *testing.T) {
+	body, err := os.ReadFile("testdata/smtp-report-wire.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report SMTPReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatal(err)
+	}
+	node := Node{ID: report.InstanceID, Kind: "tlsgate", Host: "mx", AllowedCertName: "mx", Status: statusActive}
+	if len(report.Summary.Records) == 0 || report.Truncated.Records == 0 {
+		t.Fatal("fixture must cover evidence and truncation")
+	}
+	if err := validateSMTPReport(report, node); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, store)
+	token := strings.Repeat("fixture-token", 4)
+	node.TokenHash = hashToken(token)
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	a := app{store: store, auth: &AuthService{}}
+	r := httptest.NewRequest(http.MethodPost, "/v1/smtp/reports?instance_id="+node.ID, bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	a.publicMux().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("client fixture status=%d body=%s", w.Code, w.Body.String())
 	}
 }

@@ -84,9 +84,9 @@ type SMTPCorrelation struct {
 	VerdictAt      string   `json:"verdict_at,omitempty"`
 	MessageAt      string   `json:"message_at"`
 	SessionStart   string   `json:"session_start,omitempty"`
-	Transport      string   `json:"transport"`
 	Symbols        []string `json:"symbols,omitempty"`
 	Score          float64  `json:"score"`
+	Transport      string   `json:"transport"`
 }
 
 func validateSMTPReport(report SMTPReport, node Node) error {
