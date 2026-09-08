@@ -635,6 +635,18 @@ func (s *Store) init() error {
 			window_seconds INTEGER NOT NULL,
 			UNIQUE (node_id, event_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS smtp_reports (
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			smtp_instance TEXT NOT NULL,
+			listener TEXT NOT NULL,
+			replay_id TEXT NOT NULL,
+			coverage_start TEXT NOT NULL,
+			coverage_end TEXT NOT NULL,
+			generated_at TEXT NOT NULL,
+			received_at TEXT NOT NULL,
+			report_json TEXT NOT NULL,
+			PRIMARY KEY (node_id, smtp_instance, listener)
+		)`,
 		`CREATE TABLE IF NOT EXISTS audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			actor TEXT NOT NULL,
@@ -1215,6 +1227,7 @@ func (a *app) publicMux() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/observations/batch", a.handleObservationBatch)
 	mux.HandleFunc("POST /v1/signals/batch", a.handleSignalBatch)
+	mux.HandleFunc("POST /v1/smtp/reports", a.handleSMTPReport)
 	mux.HandleFunc("GET /v1/policy", a.handlePolicy)
 	return mux
 }
@@ -1243,6 +1256,7 @@ func (a *app) adminMux() http.Handler {
 	mux.HandleFunc("POST /decisions", a.auth.require(a.handleAdminDecision))
 	mux.HandleFunc("GET /api/fingerprints", a.auth.require(a.handleAdminFingerprintsAPI))
 	mux.HandleFunc("GET /api/web-candidates", a.auth.require(a.handleAdminWebCandidatesAPI))
+	mux.HandleFunc("GET /api/smtp-reports", a.auth.require(a.handleAdminSMTPReportsAPI))
 	return mux
 }
 
@@ -1478,17 +1492,23 @@ func (a *app) handleAdminHome(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	smtpReports, err := a.store.SMTPReports()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	data := struct {
 		Nodes             []Node
 		FingerprintGroups []FingerprintGroup
 		WebCandidates     []WebCandidate
 		WebActivity       []WebSignalActivity
+		SMTPReports       []SMTPReport
 		ShadowPolicy      WebShadowPolicy
 		ObservationCount  int
 		Statuses          []string
 		AuthEnabled       bool
 		CSRFToken         string
-	}{nodes, fingerprintGroups, candidates, activity, a.shadowPolicy, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
+	}{nodes, fingerprintGroups, candidates, activity, smtpReports, a.shadowPolicy, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
 	if err := adminTemplate.Execute(w, data); err != nil {
 		log.Printf("render admin: %v", err)
 	}
@@ -2265,6 +2285,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
         <a href="#nodes">Nodes <strong>{{len .Nodes}}</strong></a>
         <a href="#web-activity">Activity <strong>{{len .WebActivity}}</strong></a>
         <a href="#web-findings">Findings <strong>{{len .WebCandidates}}</strong></a>
+        <a href="#smtp-reports">SMTP <strong>{{len .SMTPReports}}</strong></a>
         <a href="#fingerprints">Fingerprints <strong>{{len .FingerprintGroups}}</strong></a>
       </div>
       <button class="density-toggle" id="density-toggle" type="button" aria-pressed="true">Comfortable view</button>
@@ -2306,6 +2327,27 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
           </tbody>
         </table>
       </div>
+    </section>
+    <section id="smtp-reports" data-collapsible>
+      <div class="section-head">
+        <div>
+          <h2>SMTP fingerprint reports</h2>
+          <span class="muted">Rolling correlation evidence from TLSGate and mail verdicts; report only and never applied as policy</span>
+        </div>
+        <div class="section-tools"><span class="section-count">{{len .SMTPReports}} listeners · report only</span><a class="link-btn" href="/api/smtp-reports">JSON evidence</a><a class="link-btn" href="/#smtp-reports">Refresh</a></div>
+      </div>
+      <div class="wrap"><table>
+        <thead><tr><th data-sort="text">Generated</th><th data-sort="text">Node</th><th data-sort="text">SMTP source</th><th data-sort="number">Messages</th><th data-sort="number">Matched</th><th data-sort="number">Unmatched</th><th data-sort="number">Spam</th><th data-sort="number">Ham</th><th data-sort="number">Unknown</th><th data-sort="number">Fingerprints</th><th data-sort="text">Coverage</th></tr></thead>
+        <tbody>{{range .SMTPReports}}<tr>
+          <td data-value="{{.GeneratedAt}}">{{.GeneratedAt}}</td>
+          <td data-value="{{.NodeHost}}"><strong>{{.NodeHost}}</strong><div><code>{{.NodeID}}</code></div></td>
+          <td data-value="{{.SMTPInstance}}"><strong>{{.SMTPInstance}}</strong><div><code>{{.Listener}}</code></div></td>
+          <td data-value="{{.Summary.Messages}}">{{.Summary.Messages}}</td><td data-value="{{.Summary.Matched}}">{{.Summary.Matched}}</td><td data-value="{{.Summary.Unmatched}}">{{.Summary.Unmatched}}</td>
+          <td data-value="{{.Summary.Spam}}">{{.Summary.Spam}}</td><td data-value="{{.Summary.Ham}}">{{.Summary.Ham}}</td><td data-value="{{.Summary.Unknown}}">{{.Summary.Unknown}}</td>
+          <td data-value="{{len .Summary.Fingerprints}}">{{len .Summary.Fingerprints}}{{if .Truncated.Fingerprints}} <span class="muted">(+{{.Truncated.Fingerprints}} omitted)</span>{{end}}</td>
+          <td data-value="{{.CoverageEnd}}">{{.CoverageStart}}<br>{{.CoverageEnd}}</td>
+        </tr>{{else}}<tr><td colspan="11" class="muted">No SMTP correlation reports received.</td></tr>{{end}}</tbody>
+      </table></div>
     </section>
     <section id="web-activity" data-collapsible>
       <div class="section-head">

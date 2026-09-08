@@ -106,3 +106,17 @@ shadow automation; an existing manual `blocked` decision is reported as
 `--web-shadow-min-networks`, `--web-shadow-min-signals`,
 `--web-shadow-min-error-ratio`, `--web-shadow-require-multi-scope`, and
 `--web-shadow-proposed-ttl`. Optional `window` (maximum `30m`) and RFC3339 `since`
+
+## SMTP correlation reports
+
+`POST /v1/smtp/reports?instance_id=<node>` accepts a bounded rolling-window
+SMTP correlation report from an authenticated active `tlsgate` node. The JSON
+body identifies the same `instance_id`, an SMTP namespace, exact listener,
+coverage interval, generation time, content-derived replay ID, aggregate
+counts, and bounded evidence. Gatehub stores only the newest generation for
+each node/SMTP namespace/listener. An exact replay succeeds idempotently;
+a different report with an older or equal generation returns `409 Conflict`.
+
+Reports are isolated from decisions and policy responses. They cannot approve
+or block a fingerprint. Authenticated administrators can list current reports
+with `GET /api/smtp-reports` or review their summaries on the dashboard.
