@@ -189,7 +189,7 @@ func smtpReportReplayID(report SMTPReport) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func (s *Store) UpsertSMTPReport(node Node, report SMTPReport) (bool, error) {
+func (s *Store) UpsertSMTPReport(node Node, report SMTPReport) (updated bool, err error) {
 	if err := validateSMTPReport(report, node); err != nil {
 		return false, err
 	}
@@ -202,7 +202,7 @@ func (s *Store) UpsertSMTPReport(node Node, report SMTPReport) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer rollbackTransaction(tx, &err)
 	var previousReplay, previousGenerated string
 	err = tx.QueryRow(`SELECT replay_id,generated_at FROM smtp_reports WHERE node_id=? AND smtp_instance=? AND listener=?`, node.ID, report.SMTPInstance, report.Listener).Scan(&previousReplay, &previousGenerated)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -231,13 +231,12 @@ func (s *Store) UpsertSMTPReport(node Node, report SMTPReport) (bool, error) {
 	return true, nil
 }
 
-func (s *Store) SMTPReports() ([]SMTPReport, error) {
+func (s *Store) SMTPReports() (reports []SMTPReport, err error) {
 	rows, err := s.db.Query(`SELECT r.node_id,n.host,r.received_at,r.report_json FROM smtp_reports r JOIN nodes n ON n.id=r.node_id ORDER BY r.generated_at DESC,r.node_id,r.smtp_instance,r.listener`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var reports []SMTPReport
+	defer closeWithError(&err, "close SMTP report rows", rows.Close)
 	for rows.Next() {
 		var nodeID, host, received, raw string
 		if err := rows.Scan(&nodeID, &host, &received, &raw); err != nil {
