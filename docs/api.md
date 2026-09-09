@@ -69,10 +69,11 @@ control-plane-managed bypasses with this list; locally configured static ranges
 remain in force. Gatehub omits the field when discovery is disabled so an older
 deployment cannot accidentally clear local state.
 
-Web signal nodes registered with kind `log_watcher` may upload aggregate
-scanner evidence to `POST /v1/signals/batch?instance_id=<id>`. The schema
-intentionally has no raw request-target or user-agent field because access-log
-values can contain credentials and personal data:
+Web signal nodes registered with kind `gatesignal` may upload aggregate scanner
+evidence to `POST /v1/signals/batch?instance_id=<id>`. The legacy
+`log_watcher` kind remains accepted during migration. The schema intentionally
+has no raw request-target or user-agent field because access-log values can
+contain credentials and personal data:
 
 ```json
 {

@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -551,6 +552,42 @@ func TestValidateNodeTokenRejectsWeakTokens(t *testing.T) {
 	}
 	if err := validateNodeToken(strings.Repeat("a", minNodeTokenLength)); err != nil {
 		t.Fatalf("validateNodeToken(strong) = %v", err)
+	}
+}
+
+func TestWebSignalNodeKinds(t *testing.T) {
+	for _, kind := range []string{"gatesignal", "log_watcher"} {
+		node := Node{ID: "logs", Kind: kind, Host: "logs", AllowedCertName: "logs", Status: statusActive}
+		if err := validateNode(node); err != nil {
+			t.Fatalf("validateNode(kind=%q): %v", kind, err)
+		}
+		if !isWebSignalSource(kind) {
+			t.Fatalf("isWebSignalSource(%q) = false", kind)
+		}
+	}
+	if isWebSignalSource("tlsgate") {
+		t.Fatal("tlsgate accepted as a web signal source")
+	}
+}
+
+func TestGateSignalNodeCanUploadSignals(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, store)
+	token := strings.Repeat("gate-signal-token-", 3)
+	node := Node{ID: "signals-central", Kind: "gatesignal", Host: "logs", AllowedCertName: "signals-central", TokenHash: hashToken(token), Status: statusActive}
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"instance_id":"signals-central","signals":[{"event_id":"event-1","observed_at":%q,"host":"web.example.com","site":"example","ip":"192.0.2.10","trigger":"error_rate","connections":10,"errors":9,"successes":1,"window_seconds":60}]}`, time.Now().UTC().Format(time.RFC3339Nano))
+	request := httptest.NewRequest(http.MethodPost, "/v1/signals/batch?instance_id=signals-central", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	(&app{store: store}).handleSignalBatch(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("POST signal batch = %d; body: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
