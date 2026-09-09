@@ -22,6 +22,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -80,6 +81,9 @@ type config struct {
 	WebShadowMinErrorRatio   float64
 	WebShadowRequireScope    bool
 	WebShadowProposedTTL     time.Duration
+	WebEnforcementMode       string
+	WebEnforcementCanary     string
+	WebEnforcementInterval   time.Duration
 	TrustedHomeIPv4URLs      string
 	TrustedHomeIPv6Prefix    int
 	TrustedDNSNames          string
@@ -92,6 +96,7 @@ type app struct {
 	auth           *AuthService
 	shadowPolicy   WebShadowPolicy
 	trustedSources *trustedSourceManager
+	enforcement    WebEnforcementPolicy
 }
 
 func main() {
@@ -116,7 +121,7 @@ func run() (err error) {
 		return fmt.Errorf("init admin auth: %w", err)
 	}
 	trustedSources := newTrustedSourceManager(cfg)
-	a := &app{store: store, auth: auth, shadowPolicy: cfg.webShadowPolicy(), trustedSources: trustedSources}
+	a := &app{store: store, auth: auth, shadowPolicy: cfg.webShadowPolicy(), trustedSources: trustedSources, enforcement: cfg.webEnforcementPolicy()}
 	if trustedSources != nil {
 		trustedSources.Start(context.Background())
 	}
@@ -127,6 +132,7 @@ func run() (err error) {
 		return fmt.Errorf("prune web abuse signals: %w", err)
 	}
 	go startSightingPruner(store, cfg.SightingRetention)
+	go startWebEnforcer(store, a.shadowPolicy, a.enforcement)
 	errCh := make(chan error, 2)
 	if cfg.AdminListen != "" {
 		go func() {
@@ -250,6 +256,9 @@ func parseConfig() config {
 	flag.Float64Var(&cfg.WebShadowMinErrorRatio, "web-shadow-min-error-ratio", 0.90, "minimum error ratio for a shadow block (0-1)")
 	flag.BoolVar(&cfg.WebShadowRequireScope, "web-shadow-require-multi-scope", true, "require evidence across multiple sites or gate nodes")
 	flag.DurationVar(&cfg.WebShadowProposedTTL, "web-shadow-proposed-ttl", 12*time.Hour, "proposed expiry for shadow blocks")
+	flag.StringVar(&cfg.WebEnforcementMode, "web-enforcement-mode", "disabled", "web candidate enforcement mode: disabled, canary, or enforce")
+	flag.StringVar(&cfg.WebEnforcementCanary, "web-enforcement-canary-nodes", "", "comma-separated TLSGate node IDs eligible in canary mode")
+	flag.DurationVar(&cfg.WebEnforcementInterval, "web-enforcement-interval", time.Minute, "automated web decision reconciliation interval")
 	flag.StringVar(&cfg.TrustedHomeIPv4URLs, "trusted-home-ipv4-urls", "", "comma-separated HTTPS endpoints that must agree on the home public IPv4")
 	flag.IntVar(&cfg.TrustedHomeIPv6Prefix, "trusted-home-ipv6-prefix", 0, "trust public interface IPv6 addresses masked to this prefix length; 0 disables")
 	flag.StringVar(&cfg.TrustedDNSNames, "trusted-dns-names", "", "comma-separated names whose public addresses are trusted")
@@ -267,6 +276,20 @@ func parseConfig() config {
 	}
 	if cfg.WebShadowProposedTTL <= 0 {
 		log.Fatalf("--web-shadow-proposed-ttl must be positive")
+	}
+	switch cfg.WebEnforcementMode {
+	case "disabled", "canary", "enforce":
+	default:
+		log.Fatalf("invalid --web-enforcement-mode %q (want disabled, canary, or enforce)", cfg.WebEnforcementMode)
+	}
+	if cfg.WebEnforcementMode != "disabled" && !cfg.WebShadowEnabled {
+		log.Fatal("web enforcement requires --web-shadow-enabled")
+	}
+	if cfg.WebEnforcementMode == "canary" && len(splitCSV(cfg.WebEnforcementCanary)) == 0 {
+		log.Fatal("canary web enforcement requires --web-enforcement-canary-nodes")
+	}
+	if cfg.WebEnforcementInterval <= 0 {
+		log.Fatal("--web-enforcement-interval must be positive")
 	}
 	if cfg.TrustedHomeIPv6Prefix < 0 || cfg.TrustedHomeIPv6Prefix > 128 {
 		log.Fatalf("--trusted-home-ipv6-prefix must be 0 or between 1 and 128")
@@ -313,6 +336,47 @@ func (cfg config) webShadowPolicy() WebShadowPolicy {
 		MinErrorRatio:     cfg.WebShadowMinErrorRatio,
 		RequireMultiScope: cfg.WebShadowRequireScope,
 		ProposedTTL:       cfg.WebShadowProposedTTL,
+	}
+}
+
+func (cfg config) webEnforcementPolicy() WebEnforcementPolicy {
+	nodes := make(map[string]struct{})
+	for _, node := range splitCSV(cfg.WebEnforcementCanary) {
+		nodes[node] = struct{}{}
+	}
+	return WebEnforcementPolicy{
+		Mode: cfg.WebEnforcementMode, CanaryNodes: nodes,
+		Interval: cfg.WebEnforcementInterval, DecisionTTL: cfg.WebShadowProposedTTL,
+	}
+}
+
+func startWebEnforcer(store *Store, shadow WebShadowPolicy, enforcement WebEnforcementPolicy) {
+	reconcile := func() {
+		now := time.Now().UTC()
+		var candidates []WebCandidate
+		if enforcement.Enabled() {
+			var err error
+			candidates, err = store.WebCandidates(now.Add(-24*time.Hour), 5*time.Minute)
+			if err != nil {
+				log.Printf("web enforcement candidates: %v", err)
+				return
+			}
+			candidates = ScoreWebCandidates(candidates, shadow, now)
+		}
+		result, err := store.ReconcileWebEnforcement(candidates, enforcement, now)
+		if err != nil {
+			log.Printf("web enforcement reconcile: %v", err)
+			return
+		}
+		if result.Blocked > 0 || result.Expired > 0 {
+			log.Printf("web enforcement reconcile: blocked=%d expired=%d mode=%s", result.Blocked, result.Expired, enforcement.Mode)
+		}
+	}
+	reconcile()
+	ticker := time.NewTicker(enforcement.Interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		reconcile()
 	}
 }
 
@@ -414,7 +478,8 @@ func hasClientAuthEKU(usages []x509.ExtKeyUsage) bool {
 }
 
 type Store struct {
-	db *sql.DB
+	db         *sql.DB
+	decisionMu sync.Mutex
 }
 
 type Node struct {
@@ -498,6 +563,30 @@ type WebShadowPolicy struct {
 	ProposedTTL       time.Duration `json:"-"`
 }
 
+const webAutomationSource = "web-automation"
+
+type WebEnforcementPolicy struct {
+	Mode        string
+	CanaryNodes map[string]struct{}
+	Interval    time.Duration
+	DecisionTTL time.Duration
+}
+
+func (p WebEnforcementPolicy) Enabled() bool { return p.Mode == "canary" || p.Mode == "enforce" }
+
+func (p WebEnforcementPolicy) Allows(nodeID string) bool {
+	if p.Mode == "enforce" {
+		return true
+	}
+	_, ok := p.CanaryNodes[nodeID]
+	return p.Mode == "canary" && ok
+}
+
+type WebEnforcementResult struct {
+	Blocked int
+	Expired int
+}
+
 func (p WebShadowPolicy) MarshalJSON() ([]byte, error) {
 	type policyJSON struct {
 		Enabled           bool    `json:"enabled"`
@@ -547,6 +636,9 @@ type Decision struct {
 	Label       string `json:"label,omitempty"`
 	UpdatedAt   string `json:"updated_at"`
 	Actor       string `json:"actor"`
+	Source      string `json:"source,omitempty"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+	Evidence    string `json:"evidence,omitempty"`
 }
 
 func NewStore(path string) (*Store, error) {
@@ -608,7 +700,10 @@ func (s *Store) init() error {
 			status TEXT NOT NULL,
 			label TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL,
-			actor TEXT NOT NULL
+			actor TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'manual',
+			expires_at TEXT NOT NULL DEFAULT '',
+			evidence_json TEXT NOT NULL DEFAULT '{}'
 		)`,
 		`CREATE TABLE IF NOT EXISTS fingerprint_sightings (
 			node_id TEXT NOT NULL,
@@ -666,6 +761,15 @@ func (s *Store) init() error {
 		}
 	}
 	if err := addColumnIfMissing(s.db, "nodes", "token_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(s.db, "decisions", "source", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(s.db, "decisions", "expires_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(s.db, "decisions", "evidence_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return err
 	}
 	return nil
@@ -1064,6 +1168,192 @@ func ScoreWebCandidates(candidates []WebCandidate, policy WebShadowPolicy, now t
 	return candidates
 }
 
+// ReconcileWebEnforcement promotes eligible shadow findings into short-lived,
+// instance-scoped blocks and emits an explicit pending verdict when each block
+// expires. Gates retain their local policy, so omission alone cannot revoke a
+// block. Manual approvals are checked again while decision writes are locked.
+func (s *Store) ReconcileWebEnforcement(candidates []WebCandidate, policy WebEnforcementPolicy, now time.Time) (_ WebEnforcementResult, err error) {
+	var result WebEnforcementResult
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return result, err
+	}
+	defer rollbackTransaction(tx, &err)
+	nowText := now.UTC().Format(time.RFC3339Nano)
+
+	type expiredDecision struct {
+		id          int64
+		nodeID      string
+		kind        string
+		fingerprint string
+	}
+	rows, err := tx.Query(`
+		SELECT id, scope_id, kind, fingerprint
+		FROM decisions
+		WHERE scope_type = 'instance' AND source = ? AND status = ?
+		  AND ((expires_at != '' AND julianday(expires_at) <= julianday(?)) OR ? = 'disabled')
+		ORDER BY updated_at, id`, webAutomationSource, decisionBlocked, nowText, policy.Mode)
+	if err != nil {
+		return result, err
+	}
+	var expired []expiredDecision
+	for rows.Next() {
+		var item expiredDecision
+		if err := rows.Scan(&item.id, &item.nodeID, &item.kind, &item.fingerprint); err != nil {
+			_ = rows.Close()
+			return result, err
+		}
+		expired = append(expired, item)
+	}
+	if err := rows.Close(); err != nil {
+		return result, err
+	}
+	for _, item := range expired {
+		latestID, _, err := latestApplicableDecisionTx(tx, item.nodeID, item.kind, item.fingerprint)
+		if err != nil {
+			return result, err
+		}
+		if latestID != item.id {
+			continue
+		}
+		evidence, _ := json.Marshal(map[string]any{"expired_decision_id": item.id})
+		if err := insertDecisionTx(tx, Decision{
+			ScopeType: "instance", ScopeID: item.nodeID, Kind: item.kind,
+			Fingerprint: item.fingerprint, Status: decisionPending,
+			Label: "automated web block expired", Actor: "automation",
+			Source: "web-automation-expiry", Evidence: string(evidence),
+		}, nowText); err != nil {
+			return result, err
+		}
+		result.Expired++
+	}
+	if !policy.Enabled() {
+		return result, tx.Commit()
+	}
+
+	for _, candidate := range candidates {
+		if candidate.ShadowStatus != "would_block" || !policy.Allows(candidate.NodeID) {
+			continue
+		}
+		var kind string
+		if err := tx.QueryRow(`SELECT kind FROM nodes WHERE id = ? AND status = ?`, candidate.NodeID, statusActive).Scan(&kind); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return result, err
+		}
+		protected, err := hasApplicableManualApprovalTx(tx, candidate.NodeID, kind, candidate.Fingerprint)
+		if err != nil {
+			return result, err
+		}
+		if protected {
+			continue
+		}
+		var priorBlockAt string
+		err = tx.QueryRow(`SELECT updated_at FROM decisions
+			WHERE scope_type = 'instance' AND scope_id = ? AND fingerprint = ? AND source = ? AND status = ?
+			ORDER BY updated_at DESC, id DESC LIMIT 1`, candidate.NodeID, candidate.Fingerprint, webAutomationSource, decisionBlocked).Scan(&priorBlockAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return result, err
+		}
+		if err == nil {
+			priorTime, priorErr := time.Parse(time.RFC3339Nano, priorBlockAt)
+			lastEvidence, evidenceErr := time.Parse(time.RFC3339Nano, candidate.LastSeen)
+			if priorErr != nil || evidenceErr != nil {
+				return result, fmt.Errorf("parse automated decision evidence time: prior=%v evidence=%v", priorErr, evidenceErr)
+			}
+			if !lastEvidence.After(priorTime) {
+				continue
+			}
+		}
+		_, effectiveStatus, err := latestApplicableDecisionTx(tx, candidate.NodeID, kind, candidate.Fingerprint)
+		if err != nil {
+			return result, err
+		}
+		if effectiveStatus == decisionApproved || effectiveStatus == decisionBlocked {
+			continue
+		}
+		evidence, err := json.Marshal(map[string]any{
+			"policy": "web-shadow-v1", "network_count": len(candidate.Networks),
+			"site_count": len(candidate.Sites), "evidence_node_count": len(candidate.EvidenceNodes),
+			"evidence_site_count": len(candidate.EvidenceSites), "reasons": candidate.ShadowReasons,
+			"signals": candidate.Signals, "connections": candidate.Connections,
+			"errors": candidate.Errors, "successes": candidate.Successes,
+			"first_seen": candidate.FirstSeen, "last_seen": candidate.LastSeen,
+		})
+		if err != nil {
+			return result, err
+		}
+		if err := insertDecisionTx(tx, Decision{
+			ScopeType: "instance", ScopeID: candidate.NodeID, Kind: kind,
+			Fingerprint: candidate.Fingerprint, Status: decisionBlocked,
+			Label: "automated web scanner", Actor: "automation", Source: webAutomationSource,
+			ExpiresAt: now.Add(policy.DecisionTTL).UTC().Format(time.RFC3339Nano), Evidence: string(evidence),
+		}, nowText); err != nil {
+			return result, err
+		}
+		result.Blocked++
+	}
+	return result, tx.Commit()
+}
+
+func latestApplicableDecisionTx(tx *sql.Tx, nodeID, kind, fingerprint string) (int64, string, error) {
+	query := `SELECT id, status FROM decisions
+		WHERE fingerprint = ? AND ((scope_type = 'instance' AND scope_id = ?)
+			OR (scope_type = 'kind' AND scope_id = ?) OR scope_type = 'global')`
+	args := []any{fingerprint, nodeID, kind}
+	query += ` ORDER BY updated_at DESC, id DESC LIMIT 1`
+	var id int64
+	var status string
+	err := tx.QueryRow(query, args...).Scan(&id, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", nil
+	}
+	return id, status, err
+}
+
+func hasApplicableManualApprovalTx(tx *sql.Tx, nodeID, kind, fingerprint string) (bool, error) {
+	var protected bool
+	err := tx.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM decisions d
+		WHERE d.fingerprint = ? AND d.source = 'manual' AND d.status = ?
+		  AND ((d.scope_type = 'instance' AND d.scope_id = ?)
+		    OR (d.scope_type = 'kind' AND d.scope_id = ?) OR d.scope_type = 'global')
+		  AND NOT EXISTS (
+			SELECT 1 FROM decisions later
+			WHERE later.source = 'manual' AND later.fingerprint = d.fingerprint
+			  AND later.scope_type = d.scope_type AND later.scope_id = d.scope_id
+			  AND (later.updated_at > d.updated_at OR (later.updated_at = d.updated_at AND later.id > d.id))
+		  )
+	)`, fingerprint, decisionApproved, nodeID, kind).Scan(&protected)
+	return protected, err
+}
+
+func insertDecisionTx(tx *sql.Tx, d Decision, now string) error {
+	if d.Evidence == "" {
+		d.Evidence = "{}"
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ScopeType, d.ScopeID, d.Kind, d.Fingerprint, d.Status, d.Label, now,
+		d.Actor, d.Source, d.ExpiresAt, d.Evidence); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE fingerprints
+		SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
+		WHERE node_id = ? AND fingerprint = ?`,
+		d.Status, d.Label, d.Label, now, d.ScopeID, d.Fingerprint); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`INSERT INTO audit_log (actor, action, target, detail, created_at) VALUES (?, ?, ?, ?, ?)`,
+		d.Actor, "create_decision", d.ScopeType+":"+d.ScopeID+":"+d.Fingerprint,
+		d.Status+" source="+d.Source+" expires_at="+d.ExpiresAt, now)
+	return err
+}
+
 func sourceNetwork(ip string) string {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
@@ -1108,6 +1398,8 @@ func (s *Store) WebSignalActivity(since time.Time) (_ []WebSignalActivity, err e
 }
 
 func (s *Store) CreateDecision(d Decision) (err error) {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
 	if err := validateDecision(d); err != nil {
 		return err
 	}
@@ -1115,15 +1407,21 @@ func (s *Store) CreateDecision(d Decision) (err error) {
 	if d.Actor == "" {
 		d.Actor = "admin"
 	}
+	if d.Source == "" {
+		d.Source = "manual"
+	}
+	if d.Evidence == "" {
+		d.Evidence = "{}"
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer rollbackTransaction(tx, &err)
 	if _, err := tx.Exec(`
-		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.ScopeType, d.ScopeID, d.Kind, d.Fingerprint, d.Status, d.Label, now, d.Actor); err != nil {
+		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ScopeType, d.ScopeID, d.Kind, d.Fingerprint, d.Status, d.Label, now, d.Actor, d.Source, d.ExpiresAt, d.Evidence); err != nil {
 		return err
 	}
 	switch d.ScopeType {
@@ -1161,7 +1459,7 @@ func (s *Store) CreateDecision(d Decision) (err error) {
 
 func (s *Store) PolicyForNode(node Node, since string) (_ []Decision, _ string, err error) {
 	query := `
-		SELECT id, scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor
+		SELECT id, scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json
 		FROM decisions
 		WHERE updated_at > ?
 		  AND (
@@ -1179,7 +1477,7 @@ func (s *Store) PolicyForNode(node Node, since string) (_ []Decision, _ string, 
 	cursor := since
 	for rows.Next() {
 		var d Decision
-		if err := rows.Scan(&d.ID, &d.ScopeType, &d.ScopeID, &d.Kind, &d.Fingerprint, &d.Status, &d.Label, &d.UpdatedAt, &d.Actor); err != nil {
+		if err := rows.Scan(&d.ID, &d.ScopeType, &d.ScopeID, &d.Kind, &d.Fingerprint, &d.Status, &d.Label, &d.UpdatedAt, &d.Actor, &d.Source, &d.ExpiresAt, &d.Evidence); err != nil {
 			return nil, "", err
 		}
 		decisions = append(decisions, d)
@@ -1504,11 +1802,12 @@ func (a *app) handleAdminHome(w http.ResponseWriter, r *http.Request) {
 		WebActivity       []WebSignalActivity
 		SMTPReports       []SMTPReport
 		ShadowPolicy      WebShadowPolicy
+		EnforcementMode   string
 		ObservationCount  int
 		Statuses          []string
 		AuthEnabled       bool
 		CSRFToken         string
-	}{nodes, fingerprintGroups, candidates, activity, smtpReports, a.shadowPolicy, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
+	}{nodes, fingerprintGroups, candidates, activity, smtpReports, a.shadowPolicy, a.enforcement.Mode, len(fps), []string{decisionApproved, decisionBlocked, decisionPending}, a.auth.enabled(), a.auth.csrfToken(r)}
 	if err := adminTemplate.Execute(w, data); err != nil {
 		log.Printf("render admin: %v", err)
 	}
@@ -1709,7 +2008,7 @@ func (a *app) handleAdminWebCandidatesAPI(w http.ResponseWriter, r *http.Request
 		return
 	}
 	candidates = ScoreWebCandidates(candidates, a.shadowPolicy, time.Now())
-	writeJSON(w, http.StatusOK, map[string]any{"mode": "shadow", "policy": a.shadowPolicy, "candidates": candidates})
+	writeJSON(w, http.StatusOK, map[string]any{"mode": "shadow", "enforcement_mode": a.enforcement.Mode, "policy": a.shadowPolicy, "candidates": candidates})
 }
 
 func validateNode(n Node) error {
@@ -1842,6 +2141,14 @@ func validateDecision(d Decision) error {
 	}
 	if !validDecisionStatus(d.Status) {
 		return fmt.Errorf("invalid decision status %q", d.Status)
+	}
+	if d.ExpiresAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, d.ExpiresAt); err != nil {
+			return fmt.Errorf("invalid decision expiry: %w", err)
+		}
+	}
+	if d.Evidence != "" && !json.Valid([]byte(d.Evidence)) {
+		return errors.New("decision evidence must be valid JSON")
 	}
 	return nil
 }
@@ -2387,10 +2694,10 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       <div class="section-head">
         <div>
           <h2>Web scanner findings</h2>
-          <span class="muted">HTTP abuse signals correlated with a TLS fingerprint on the same host within five minutes; shadow scoring never creates decisions</span>
+          <span class="muted">HTTP abuse signals correlated with a TLS fingerprint on the same host within five minutes; promotion is instance-scoped and separately gated</span>
         </div>
         <div class="section-tools">
-          <span class="section-count">{{len .WebCandidates}} candidates · last 24 hours · {{if .ShadowPolicy.Enabled}}shadow policy active{{else}}shadow policy disabled{{end}}</span>
+          <span class="section-count">{{len .WebCandidates}} candidates · last 24 hours · {{if .ShadowPolicy.Enabled}}shadow active{{else}}shadow disabled{{end}} · enforcement {{.EnforcementMode}}</span>
           <a class="link-btn" href="/#web-findings">Refresh</a>
         </div>
       </div>

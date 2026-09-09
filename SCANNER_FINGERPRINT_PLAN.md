@@ -88,7 +88,9 @@ Raw connection or request counts alone must never trigger a fingerprint block.
 4. Add authenticated abuse-signal ingestion and retention to Gatehub.
 5. Implement correlation and candidate reporting with no automatic blocks.
 6. Observe candidates, tune thresholds, and add audit/UI visibility.
-7. Enable expiring automated decisions explicitly.
+7. Enable expiring automated decisions explicitly. Implemented with a disabled
+   default, instance-scoped canary allowlist, explicit expiry verdicts, manual
+   approval precedence, and a disable-mode kill switch.
 8. Retire web_watcher where its local IP blocking and analytics are no longer
    needed; retain it where those functions remain useful.
 

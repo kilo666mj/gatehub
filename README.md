@@ -77,9 +77,11 @@ Gate instances upload fingerprint observations and pull approval policy.
 Signal-producing nodes can submit privacy-bounded aggregate scanner evidence;
 the admin API correlates those signals with recent TLS sightings. An optional
 shadow policy explains which candidates would receive a short-lived block under
-configured network, signal, error-ratio, and cross-site/node thresholds, but it
-never creates or distributes decisions automatically. Manual approvals act as
-protection overrides.
+configured network, signal, error-ratio, and cross-site/node thresholds. A
+separately gated enforcement controller can promote those findings into
+instance-scoped, expiring decisions. It defaults to disabled, supports an
+explicit canary-node allowlist, publishes an explicit pending verdict at expiry,
+and treats manual approvals as protection overrides.
 
 See the [synchronization API reference](docs/api.md) for request and response
 examples, retention behavior, and the web-candidate endpoint.

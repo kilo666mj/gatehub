@@ -98,14 +98,26 @@ report-only candidates grouped by gate instance and fingerprint. When the
 shadow policy is enabled, each candidate also includes `shadow_status`,
 `shadow_reasons`, the measured `error_ratio`, cross-site/node evidence, and a
 proposed expiry. `would_block` is simulation output only: this endpoint never
-creates a decision and shadow results are never returned to gate nodes.
+creates a decision. The response's `enforcement_mode` reports whether the
+separate background controller is `disabled`, `canary`, or `enforce`.
 
 An existing manual `approved` decision protects the matching fingerprint from
 shadow automation; an existing manual `blocked` decision is reported as
 `already_blocked`. Configure scoring with `--web-shadow-enabled`,
 `--web-shadow-min-networks`, `--web-shadow-min-signals`,
 `--web-shadow-min-error-ratio`, `--web-shadow-require-multi-scope`, and
-`--web-shadow-proposed-ttl`. Optional `window` (maximum `30m`) and RFC3339 `since`
+`--web-shadow-proposed-ttl`. Optional `window` (maximum `30m`) and RFC3339
+`since` parameters select the correlation interval.
+
+Automated promotion is disabled by default. `--web-enforcement-mode=canary`
+creates expiring, instance-scoped blocks only for node IDs in
+`--web-enforcement-canary-nodes`; `enforce` permits every eligible TLSGate
+node. `--web-enforcement-interval` controls reconciliation frequency. Switching
+the mode to `disabled` is the kill switch: Gatehub emits explicit `pending`
+decisions for effective automated blocks so gates cannot retain stale local
+blocks. A block is renewed only when evidence newer than the previous block is
+present. Decision records retain their source, expiry, and aggregate evidence;
+raw request targets are never stored.
 
 ## SMTP correlation reports
 
