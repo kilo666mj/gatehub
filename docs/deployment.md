@@ -78,7 +78,7 @@ do not appear in process arguments or shell history:
 
 ```sh
 gatehub register-node --db /var/lib/gatehub/gatehub.sqlite \
-  --id logs-central --kind log_watcher --host logwc \
+  --id logs-central --kind gatesignal --host logwc \
   --allowed-cert-name logs-central --token-file /run/secrets/log-watcher-token
 ```
 
@@ -134,4 +134,3 @@ If you put `127.0.0.1:9443` behind a normal HTTP reverse proxy or tunnel, make
 sure client certificate identity still reaches `gatehub`. Standard HTTP
 termination at the proxy will not pass the node mTLS certificate through to the
 origin process.
-

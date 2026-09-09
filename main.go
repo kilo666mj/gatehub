@@ -1617,7 +1617,7 @@ func (a *app) handleSignalBatch(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if node.Kind != "log_watcher" {
+	if !isWebSignalSource(node.Kind) {
 		writeError(w, http.StatusForbidden, errors.New("node is not a web signal source"))
 		return
 	}
@@ -2015,13 +2015,17 @@ func validateNode(n Node) error {
 	if n.ID == "" || n.Kind == "" || n.Host == "" || n.AllowedCertName == "" {
 		return errors.New("id, kind, host, and allowed_cert_name are required")
 	}
-	if n.Kind != "tlsgate" && n.Kind != "sshgate" && n.Kind != "log_watcher" {
+	if n.Kind != "tlsgate" && n.Kind != "sshgate" && !isWebSignalSource(n.Kind) {
 		return fmt.Errorf("invalid kind %q", n.Kind)
 	}
 	if n.Status != "" && !validNodeStatus(n.Status) {
 		return fmt.Errorf("invalid node status %q", n.Status)
 	}
 	return nil
+}
+
+func isWebSignalSource(kind string) bool {
+	return kind == "gatesignal" || kind == "log_watcher"
 }
 
 func validateAbuseSignal(signal AbuseSignal) error {
@@ -2605,7 +2609,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       <form class="grid" method="post" action="/nodes">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <label>Instance ID<input name="id" placeholder="mail-tls" required></label>
-        <label>Kind<select name="kind"><option>tlsgate</option><option>sshgate</option><option>log_watcher</option></select></label>
+        <label>Kind<select name="kind"><option>tlsgate</option><option>sshgate</option><option>gatesignal</option><option>log_watcher</option></select></label>
         <label>Host<input name="host" placeholder="mail-gateway" required></label>
         <label>Allowed cert name<input name="allowed_cert_name" placeholder="mail-gateway" required></label>
         <label>Node token<input name="token" type="password" placeholder="leave blank to keep"></label>
@@ -2660,7 +2664,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
       <div class="section-head">
         <div>
           <h2>Web scanner activity</h2>
-          <span class="muted">Aggregate HTTP abuse signals received from log_watcher; informational and not correlated for enforcement</span>
+          <span class="muted">Aggregate HTTP abuse signals received from GateSignal or a legacy log_watcher source; informational and not correlated for enforcement</span>
         </div>
         <div class="section-tools">
           <span class="section-count">{{len .WebActivity}} sources · last 24 hours · report only</span>
