@@ -49,6 +49,13 @@ gatehub_web_shadow_min_error_ratio: 0.90
 gatehub_web_shadow_require_multi_scope: true
 gatehub_web_shadow_proposed_ttl: 12h
 
+# Automated promotion is separately gated. "disabled" also revokes any active
+# automated blocks, making it the emergency kill switch. Canary mode only
+# affects the explicitly listed TLSGate instance IDs.
+gatehub_web_enforcement_mode: disabled
+gatehub_web_enforcement_canary_nodes: ""
+gatehub_web_enforcement_interval: 1m
+
 # Optional expiring trusted-source discovery. Keep real DNS names in ignored
 # host vars. Multiple HTTPS reflectors must agree before IPv4 trust changes.
 gatehub_trusted_home_ipv4_urls: ""
