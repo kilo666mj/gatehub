@@ -11,7 +11,9 @@
 Gatehub is the shared control plane for
 [TLSGate](https://github.com/kilo666mj/tlsgate) and
 [SSHGate](https://github.com/kilo666mj/sshgate) fingerprint observations and
-approval decisions.
+approval decisions. It also accepts privacy-bounded HTTP scanner signals from
+[GateSignal](https://github.com/kilo666mj/gatesignal) and correlates them with
+recent TLS sightings.
 
 It exposes two separate HTTP surfaces:
 
@@ -21,6 +23,21 @@ It exposes two separate HTTP surfaces:
   node credentials or mTLS.
 
 Do not expose the admin listener as the public synchronization surface.
+
+## Security boundary
+
+Gatehub authenticates administrators and registered nodes; it does not
+authenticate end users of the services behind a gate. Fingerprints and scanner
+signals are operator evidence, not identities. TLSGate and SSHGate remain noise
+filters in front of backends that must keep their own TLS, SSH, account,
+rate-limit, and abuse controls.
+
+Keep the OIDC-protected admin listener separate from the node synchronization
+listener. A registered node may upload observations only as its configured
+instance identity. Bearer tokens are stored as hashes, and mTLS identities are
+matched to the certificate name registered for that node. The SQLite database
+contains operational history, node credentials, sessions, and decisions; treat
+the database and its backups as secrets.
 
 ## Quick start
 
@@ -99,7 +116,11 @@ credential-bearing contents as sensitive operational data.
 ## Documentation
 
 - [Deployment and authentication](docs/deployment.md)
+- [Operations, backup, upgrades, and troubleshooting](docs/operations.md)
 - [Synchronization API](docs/api.md)
+- [How the five Gate projects fit together](https://github.com/kilo666mj/michaelspost-docs/blob/main/docs/guides/gate-stack.md)
+- [Gatekit node library](https://github.com/kilo666mj/gatekit)
+- [GateSignal access-log pipeline](https://github.com/kilo666mj/gatesignal)
 - [TLSGate](https://github.com/kilo666mj/tlsgate)
 - [SSHGate](https://github.com/kilo666mj/sshgate)
 - [OIDC relying-party helper](https://github.com/kilo666mj/oidcrp)

@@ -34,9 +34,18 @@ For localhost-only development you can disable auth with `--admin-auth none`.
 The process refuses to start an OIDC admin listener without an issuer, client ID,
 and redirect URL, so a misconfiguration cannot silently expose the approval API.
 
-Client certificates are used as node identity. A node must be registered in
-`gatehub` before it can sync, and its configured `allowed_cert_name`
-must match the client certificate Common Name, DNS SAN, or URI SAN.
+The public synchronization listener supports three authentication modes:
+
+| Mode | Node credential | TLS requirement at Gatehub |
+| --- | --- | --- |
+| `mtls` | Client certificate | Server certificate, key, and client CA |
+| `token` | Bearer token | May terminate TLS at a trusted reverse proxy |
+| `both` | Client certificate or bearer token | Server certificate, key, and client CA |
+
+A node must be registered before it can synchronize. In mTLS mode its
+`allowed_cert_name` must match the client certificate Common Name, DNS SAN, or
+URI SAN. In token mode the submitted bearer token must match the stored hash.
+Both methods bind the authenticated request to the `instance_id` it reports.
 
 ## Run Admin Only
 
@@ -78,8 +87,8 @@ do not appear in process arguments or shell history:
 
 ```sh
 gatehub register-node --db /var/lib/gatehub/gatehub.sqlite \
-  --id logs-central --kind gatesignal --host logwc \
-  --allowed-cert-name logs-central --token-file /run/secrets/log-watcher-token
+  --id logs-central --kind gatesignal --host log-collector.example.net \
+  --allowed-cert-name logs-central --token-file /run/secrets/gatesignal-token
 ```
 
 Use `--token-file -` to read one newline-terminated token from standard input.
