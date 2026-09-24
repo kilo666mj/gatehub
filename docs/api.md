@@ -126,7 +126,10 @@ raw request targets are never stored.
 SMTP correlation report from an authenticated active `tlsgate` node. The JSON
 body identifies the same `instance_id`, an SMTP namespace, exact listener,
 coverage interval, generation time, content-derived replay ID, aggregate
-counts, and bounded evidence. Gatehub stores only the newest generation for
+counts, bounded TLS/message evidence, and an optional bounded
+`smtp-campaign-report/v1` report containing exact-tuple, report-only non-TLS
+campaign classifications. Raw SMTP command arguments are not accepted.
+Gatehub stores only the newest generation for
 each node/SMTP namespace/listener. An exact replay succeeds idempotently;
 a different report with an older or equal generation returns `409 Conflict`.
 

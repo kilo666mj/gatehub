@@ -2648,7 +2648,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
         <div class="section-tools"><span class="section-count">{{len .SMTPReports}} listeners · report only</span><a class="link-btn" href="/api/smtp-reports">JSON evidence</a><a class="link-btn" href="/#smtp-reports">Refresh</a></div>
       </div>
       <div class="wrap"><table>
-        <thead><tr><th data-sort="text">Generated</th><th data-sort="text">Node</th><th data-sort="text">SMTP source</th><th data-sort="number">Messages</th><th data-sort="number">Matched</th><th data-sort="number">Unmatched</th><th data-sort="number">Spam</th><th data-sort="number">Ham</th><th data-sort="number">Unknown</th><th data-sort="number">Fingerprints</th><th data-sort="text">Coverage</th></tr></thead>
+        <thead><tr><th data-sort="text">Generated</th><th data-sort="text">Node</th><th data-sort="text">SMTP source</th><th data-sort="number">Messages</th><th data-sort="number">Matched</th><th data-sort="number">Unmatched</th><th data-sort="number">Spam</th><th data-sort="number">Ham</th><th data-sort="number">Unknown</th><th data-sort="number">Fingerprints</th><th data-sort="number">Campaign matches</th><th data-sort="text">Coverage</th></tr></thead>
         <tbody>{{range .SMTPReports}}<tr>
           <td data-value="{{.GeneratedAt}}">{{.GeneratedAt}}</td>
           <td data-value="{{.NodeHost}}"><strong>{{.NodeHost}}</strong><div><code>{{.NodeID}}</code></div></td>
@@ -2656,8 +2656,9 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
           <td data-value="{{.Summary.Messages}}">{{.Summary.Messages}}</td><td data-value="{{.Summary.Matched}}">{{.Summary.Matched}}</td><td data-value="{{.Summary.Unmatched}}">{{.Summary.Unmatched}}</td>
           <td data-value="{{.Summary.Spam}}">{{.Summary.Spam}}</td><td data-value="{{.Summary.Ham}}">{{.Summary.Ham}}</td><td data-value="{{.Summary.Unknown}}">{{.Summary.Unknown}}</td>
           <td data-value="{{len .Summary.Fingerprints}}">{{len .Summary.Fingerprints}}{{if .Truncated.Fingerprints}} <span class="muted">(+{{.Truncated.Fingerprints}} omitted)</span>{{end}}</td>
+          {{if .Campaign}}<td data-value="{{.Campaign.Matched}}">{{.Campaign.Matched}}<div class="muted">{{len .Campaign.Records}} evidence{{if .Truncated.CampaignRecords}} · +{{.Truncated.CampaignRecords}} omitted{{end}}</div></td>{{else}}<td data-value="0" class="muted">—</td>{{end}}
           <td data-value="{{.CoverageEnd}}">{{.CoverageStart}}<br>{{.CoverageEnd}}</td>
-        </tr>{{else}}<tr><td colspan="11" class="muted">No SMTP correlation reports received.</td></tr>{{end}}</tbody>
+        </tr>{{else}}<tr><td colspan="12" class="muted">No SMTP correlation reports received.</td></tr>{{end}}</tbody>
       </table></div>
     </section>
     <section id="web-activity" data-collapsible>
