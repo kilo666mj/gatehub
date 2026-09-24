@@ -16,6 +16,9 @@
         CGO_ENABLED: "0"
         GOOS: "{{ gatehub_goos }}"
         GOARCH: "{{ gatehub_goarch }}"
+        GOTOOLCHAIN: go1.27.1
+        GOCACHE: /tmp/gatehub-go-cache
+        GOMODCACHE: /tmp/gatehub-go-mod-cache
       delegate_to: localhost
       become: false
       changed_when: true
