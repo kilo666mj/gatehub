@@ -20,24 +20,54 @@ var errStaleSMTPReport = errors.New("SMTP report is older than the stored genera
 var replayIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type SMTPReport struct {
-	SchemaVersion int               `json:"schema_version"`
-	InstanceID    string            `json:"instance_id"`
-	SMTPInstance  string            `json:"smtp_instance"`
-	Listener      string            `json:"listener"`
-	CoverageStart time.Time         `json:"coverage_start"`
-	CoverageEnd   time.Time         `json:"coverage_end"`
-	GeneratedAt   time.Time         `json:"generated_at"`
-	ReplayID      string            `json:"replay_id"`
-	Summary       SMTPReportSummary `json:"summary"`
-	Truncated     SMTPTruncated     `json:"truncated"`
-	NodeID        string            `json:"node_id,omitempty"`
-	NodeHost      string            `json:"node_host,omitempty"`
-	ReceivedAt    string            `json:"received_at,omitempty"`
+	SchemaVersion int                 `json:"schema_version"`
+	InstanceID    string              `json:"instance_id"`
+	SMTPInstance  string              `json:"smtp_instance"`
+	Listener      string              `json:"listener"`
+	CoverageStart time.Time           `json:"coverage_start"`
+	CoverageEnd   time.Time           `json:"coverage_end"`
+	GeneratedAt   time.Time           `json:"generated_at"`
+	ReplayID      string              `json:"replay_id"`
+	Summary       SMTPReportSummary   `json:"summary"`
+	Campaign      *SMTPCampaignReport `json:"campaign,omitempty"`
+	Truncated     SMTPTruncated       `json:"truncated"`
+	NodeID        string              `json:"node_id,omitempty"`
+	NodeHost      string              `json:"node_host,omitempty"`
+	ReceivedAt    string              `json:"received_at,omitempty"`
 }
 
 type SMTPTruncated struct {
-	Fingerprints int `json:"fingerprints"`
-	Records      int `json:"records"`
+	Fingerprints    int `json:"fingerprints"`
+	Records         int `json:"records"`
+	CampaignRecords int `json:"campaign_records,omitempty"`
+}
+
+type SMTPCampaignReport struct {
+	Schema                     string               `json:"schema"`
+	Instance                   string               `json:"instance"`
+	Listener                   string               `json:"listener"`
+	Signature                  string               `json:"signature"`
+	Signatures                 []string             `json:"signatures,omitempty"`
+	Connections                int                  `json:"connections"`
+	EvidenceSessions           int                  `json:"evidence_sessions"`
+	Matched                    int                  `json:"matched"`
+	Unmatched                  int                  `json:"unmatched"`
+	ConnectionsWithoutEvidence int                  `json:"connections_without_evidence"`
+	MalformedEvents            int                  `json:"malformed_events"`
+	MalformedLogLines          int                  `json:"malformed_log_lines"`
+	Records                    []SMTPCampaignRecord `json:"records"`
+}
+
+type SMTPCampaignRecord struct {
+	Timestamp           time.Time `json:"timestamp"`
+	Client              string    `json:"client"`
+	ConnectionID        string    `json:"connection_id,omitempty"`
+	BehaviorFingerprint string    `json:"behavior_fingerprint,omitempty"`
+	Signature           string    `json:"signature,omitempty"`
+	Reason              string    `json:"reason"`
+	Provider            string    `json:"provider,omitempty"`
+	NetworkPrefix       string    `json:"network_prefix,omitempty"`
+	RecipientCluster    string    `json:"recipient_cluster,omitempty"`
 }
 
 type SMTPReportSummary struct {
@@ -127,7 +157,7 @@ func validateSMTPReport(report SMTPReport, node Node) error {
 	if len(report.Summary.Fingerprints) > maxSMTPReportItems || len(report.Summary.Records) > maxSMTPReportItems || len(report.Summary.Reasons) > maxSMTPReportItems {
 		return errors.New("SMTP report evidence exceeds item limit")
 	}
-	counts := []int{report.Summary.Messages, report.Summary.Matched, report.Summary.Unmatched, report.Summary.Spam, report.Summary.Ham, report.Summary.Unknown, report.Summary.Connections, report.Summary.STARTTLS, report.Summary.NoObservedTLS, report.Summary.Incomplete, report.Summary.MalformedEvents, report.Summary.MalformedVerdicts, report.Summary.TLSMessages, report.Summary.PlaintextMessages, report.Summary.UnknownTransportMessages, report.Truncated.Fingerprints, report.Truncated.Records}
+	counts := []int{report.Summary.Messages, report.Summary.Matched, report.Summary.Unmatched, report.Summary.Spam, report.Summary.Ham, report.Summary.Unknown, report.Summary.Connections, report.Summary.STARTTLS, report.Summary.NoObservedTLS, report.Summary.Incomplete, report.Summary.MalformedEvents, report.Summary.MalformedVerdicts, report.Summary.TLSMessages, report.Summary.PlaintextMessages, report.Summary.UnknownTransportMessages, report.Truncated.Fingerprints, report.Truncated.Records, report.Truncated.CampaignRecords}
 	for _, count := range counts {
 		if count < 0 {
 			return errors.New("SMTP report counts must be non-negative")
@@ -172,6 +202,62 @@ func validateSMTPReport(report SMTPReport, node Node) error {
 			return errors.New("invalid evidence transport")
 		}
 	}
+	if report.Campaign != nil {
+		if err := validateSMTPCampaignReport(*report.Campaign, report.SMTPInstance, report.Listener); err != nil {
+			return err
+		}
+		if len(report.Campaign.Records) > maxSMTPReportItems {
+			return errors.New("SMTP campaign evidence exceeds item limit")
+		}
+		if len(report.Campaign.Records)+report.Truncated.CampaignRecords != report.Campaign.EvidenceSessions {
+			return errors.New("campaign record count does not match evidence sessions")
+		}
+	} else if report.Truncated.CampaignRecords != 0 {
+		return errors.New("campaign truncation present without campaign report")
+	}
+	return nil
+}
+
+func validateSMTPCampaignReport(report SMTPCampaignReport, smtpInstance, listener string) error {
+	if report.Schema != "smtp-campaign-report/v1" {
+		return fmt.Errorf("unsupported campaign schema %q", report.Schema)
+	}
+	if report.Instance != smtpInstance || report.Listener != listener {
+		return errors.New("campaign report identity does not match SMTP report")
+	}
+	counts := []int{report.Connections, report.EvidenceSessions, report.Matched, report.Unmatched, report.ConnectionsWithoutEvidence, report.MalformedEvents, report.MalformedLogLines}
+	for _, count := range counts {
+		if count < 0 {
+			return errors.New("campaign report counts must be non-negative")
+		}
+	}
+	if report.Matched+report.Unmatched != report.EvidenceSessions || report.ConnectionsWithoutEvidence > report.Connections {
+		return errors.New("inconsistent campaign report counts")
+	}
+	if len(report.Signatures) == 0 || len(report.Signatures) > 32 {
+		return errors.New("invalid campaign signatures")
+	}
+	known := make(map[string]bool, len(report.Signatures))
+	for _, signature := range report.Signatures {
+		if signature == "" || len(signature) > 128 || known[signature] {
+			return errors.New("invalid campaign signature")
+		}
+		known[signature] = true
+	}
+	if report.Signature != "" && !known[report.Signature] {
+		return errors.New("campaign primary signature is not declared")
+	}
+	for _, record := range report.Records {
+		if record.Timestamp.IsZero() || len(record.Client) > 256 || len(record.ConnectionID) > 128 || len(record.BehaviorFingerprint) > 128 || len(record.Signature) > 128 || len(record.Reason) > 128 || len(record.Provider) > 128 || len(record.NetworkPrefix) > 128 || len(record.RecipientCluster) > 128 {
+			return errors.New("invalid campaign evidence")
+		}
+		if _, _, err := net.SplitHostPort(record.Client); err != nil {
+			return fmt.Errorf("campaign evidence client must be an exact IP:port endpoint: %w", err)
+		}
+		if record.Signature != "" && !known[record.Signature] {
+			return errors.New("campaign evidence signature is not declared")
+		}
+	}
 	return nil
 }
 
@@ -180,8 +266,9 @@ func smtpReportReplayID(report SMTPReport) (string, error) {
 		Instance, Listener string
 		Start, End         time.Time
 		Summary            SMTPReportSummary
+		Campaign           *SMTPCampaignReport `json:",omitempty"`
 		Truncated          SMTPTruncated
-	}{report.SMTPInstance, report.Listener, report.CoverageStart.UTC(), report.CoverageEnd.UTC(), report.Summary, report.Truncated})
+	}{report.SMTPInstance, report.Listener, report.CoverageStart.UTC(), report.CoverageEnd.UTC(), report.Summary, report.Campaign, report.Truncated})
 	if err != nil {
 		return "", err
 	}

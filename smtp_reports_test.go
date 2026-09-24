@@ -68,6 +68,52 @@ func TestSMTPReportsAreNodeIsolatedReplaySafeAndMonotonic(t *testing.T) {
 	}
 }
 
+func TestSMTPReportStoresBoundedCampaignEvidenceWithoutPolicy(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, store)
+	node := Node{ID: "mail-tls", Kind: "tlsgate", Host: "mx", AllowedCertName: "mx", Status: statusActive}
+	if err := store.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+	report := testSMTPReport(node.ID, "", time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC))
+	report.Campaign = &SMTPCampaignReport{
+		Schema: "smtp-campaign-report/v1", Instance: report.SMTPInstance, Listener: report.Listener,
+		Signature:   "smtp/pregreet-helo-support-selfdomain/v1",
+		Signatures:  []string{"smtp/pregreet-helo-support-selfdomain/v1", "smtp/pregreet-ehlo-user/v1"},
+		Connections: 4, EvidenceSessions: 2, Matched: 1, Unmatched: 1, ConnectionsWithoutEvidence: 2,
+		Records: []SMTPCampaignRecord{
+			{Timestamp: report.GeneratedAt.Add(-time.Hour), Client: "192.0.2.1:12345", ConnectionID: "c1", Signature: "smtp/pregreet-ehlo-user/v1", Reason: "matched"},
+			{Timestamp: report.GeneratedAt.Add(-30 * time.Minute), Client: "192.0.2.2:23456", Reason: "no_exact_connection"},
+		},
+	}
+	report.ReplayID, err = smtpReportReplayID(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertSMTPReport(node, report); err != nil {
+		t.Fatal(err)
+	}
+	reports, err := store.SMTPReports()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 || reports[0].Campaign == nil || reports[0].Campaign.Matched != 1 || reports[0].Campaign.Records[0].Signature != "smtp/pregreet-ehlo-user/v1" {
+		t.Fatalf("campaign evidence did not round-trip: %+v", reports)
+	}
+	var decisions int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&decisions); err != nil || decisions != 0 {
+		t.Fatalf("campaign report wrote policy: count=%d err=%v", decisions, err)
+	}
+	report.Campaign.Listener = "[::]:587"
+	report.ReplayID, _ = smtpReportReplayID(report)
+	if _, err := store.UpsertSMTPReport(node, report); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("mismatched campaign identity error = %v", err)
+	}
+}
+
 func TestSMTPReportHandlerAuthenticatesKindAndIdentity(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
