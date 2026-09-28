@@ -655,3 +655,63 @@ func TestValidateObservationBounds(t *testing.T) {
 		t.Fatal("oversized metadata accepted")
 	}
 }
+
+func TestFingerprintApprovalConflicts(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		otherKind   string
+		otherNode   string
+		otherStatus string
+		want        bool
+	}{
+		{"approved versus blocked", "tlsgate", "web", decisionBlocked, true},
+		{"pending is not a block", "tlsgate", "web", decisionPending, false},
+		{"different gate kinds", "sshgate", "web", decisionBlocked, false},
+		{"same node", "tlsgate", "mail", decisionBlocked, false},
+		{"missing node identity", "tlsgate", "", decisionBlocked, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			groups := groupFingerprints([]Fingerprint{
+				{NodeID: "mail", Kind: "tlsgate", Fingerprint: "shared", Status: decisionApproved},
+				{NodeID: tc.otherNode, Kind: tc.otherKind, Fingerprint: "shared", Status: tc.otherStatus},
+			})
+			if len(groups) != 1 || groups[0].ApprovalConflict != tc.want {
+				t.Fatalf("groups = %+v; want conflict %t", groups, tc.want)
+			}
+			if groups[0].Instances[0].Status == "" {
+				t.Fatal("report lost original observations")
+			}
+		})
+	}
+}
+
+func TestAdminReportsApprovalConflictWithoutChangingPolicy(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, store)
+	for id, status := range map[string]string{"mail": decisionApproved, "web": decisionBlocked} {
+		node := Node{ID: id, Kind: "tlsgate", Host: id + ".example.com", AllowedCertName: id, Status: statusActive}
+		if err := store.UpsertNode(node); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertObservations(node, []Fingerprint{{Fingerprint: "shared", Status: status}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateDecision(Decision{ScopeType: "instance", ScopeID: id, Kind: node.Kind, Fingerprint: "shared", Status: status, Actor: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	(&app{store: store, auth: &AuthService{}}).handleAdminHome(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "Approval conflict: approved and blocked on different nodes") {
+		t.Fatalf("missing conflict report: %d %s", recorder.Code, recorder.Body.String())
+	}
+	for id, status := range map[string]string{"mail": decisionApproved, "web": decisionBlocked} {
+		decisions, _, err := store.PolicyForNode(Node{ID: id, Kind: "tlsgate"}, "")
+		if err != nil || len(decisions) != 1 || decisions[0].Status != status {
+			t.Fatalf("report changed policy for %s: %+v, %v", id, decisions, err)
+		}
+	}
+}

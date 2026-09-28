@@ -614,16 +614,17 @@ type WebSignalActivity struct {
 }
 
 type FingerprintGroup struct {
-	Fingerprint string
-	Status      string
-	Label       string
-	LabelsVary  bool
-	LastSeen    string
-	IPs         []string
-	Count       int
-	HostNames   []string
-	MoreHosts   int
-	Instances   []Fingerprint
+	ApprovalConflict bool
+	Fingerprint      string
+	Status           string
+	Label            string
+	LabelsVary       bool
+	LastSeen         string
+	IPs              []string
+	Count            int
+	HostNames        []string
+	MoreHosts        int
+	Instances        []Fingerprint
 }
 
 type Decision struct {
@@ -1843,6 +1844,7 @@ func groupFingerprints(fps []Fingerprint) []FingerprintGroup {
 
 	result := make([]FingerprintGroup, 0, len(groups))
 	for _, group := range groups {
+		group.ApprovalConflict = hasApprovalConflict(group.Instances)
 		hostSet := make(map[string]struct{})
 		ipSet := make(map[string]struct{})
 		for _, fp := range group.Instances {
@@ -1877,6 +1879,31 @@ func groupFingerprints(fps []Fingerprint) []FingerprintGroup {
 		return result[i].LastSeen > result[j].LastSeen
 	})
 	return result
+}
+
+// hasApprovalConflict compares reported states within the same gate kind.
+// It is review evidence only, never a request to change policy.
+func hasApprovalConflict(instances []Fingerprint) bool {
+	approved := make(map[string]map[string]bool)
+	for _, fp := range instances {
+		if fp.Status == decisionApproved && fp.NodeID != "" && fp.Kind != "" {
+			if approved[fp.Kind] == nil {
+				approved[fp.Kind] = make(map[string]bool)
+			}
+			approved[fp.Kind][fp.NodeID] = true
+		}
+	}
+	for _, fp := range instances {
+		if fp.Status != decisionBlocked || fp.NodeID == "" {
+			continue
+		}
+		for node := range approved[fp.Kind] {
+			if node != fp.NodeID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func groupedFingerprintStatusRank(status string) int {
@@ -2772,7 +2799,7 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
                   </div>
                 </details>
               </td>
-              <td data-value="{{.Status}}"><span class="badge status-{{.Status}}">{{.Status}}</span></td>
+              <td data-value="{{.Status}}"><span class="badge status-{{.Status}}">{{.Status}}</span>{{if .ApprovalConflict}}<p class="badge status-pending">Approval conflict: approved and blocked on different nodes</p><p class="muted">Review host observations and current decisions before extending trust.</p>{{end}}</td>
               <td data-value="{{.Label}}">{{if .LabelsVary}}<span class="muted">varies by host</span>{{else if .Label}}{{.Label}}{{else}}<span class="muted">-</span>{{end}}</td>
               <td data-value="{{.LastSeen}}">{{.LastSeen}}</td>
               <td data-value="{{len .IPs}}">
