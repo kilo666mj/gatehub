@@ -64,7 +64,7 @@ func (s *Store) checkNodeScopeCompatibility(n Node) error {
 	return nil
 }
 
-// Capability is learned only from an authenticated policy request, not admin input.
+// RecordScopeCapability learns support only from an authenticated policy request, not admin input.
 func (s *Store) RecordScopeCapability(node Node, supported bool) error {
 	s.decisionMu.Lock()
 	defer s.decisionMu.Unlock()
