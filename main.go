@@ -924,6 +924,9 @@ func (s *Store) UpsertObservations(node Node, observations []Fingerprint) (err e
 			fp.LastSeen, ips, ports, fp.Count, meta, now); err != nil {
 			return err
 		}
+		if err := applyCurrentDecisionTx(tx, node, fp.Fingerprint); err != nil {
+			return err
+		}
 		for _, sighting := range fp.Sightings {
 			if _, err := tx.Exec(`
 				INSERT INTO fingerprint_sightings (node_id, fingerprint, ip, port, last_seen)

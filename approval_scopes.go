@@ -146,3 +146,21 @@ func (a *app) handleAdminDecisionAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
+// A preapproval must remain visible when its first observation creates the row.
+// Observations never provide the authoritative status or scope.
+func applyCurrentDecisionTx(tx *sql.Tx, node Node, fp string) error {
+	var status, label string
+	var ranges sql.NullString
+	err := tx.QueryRow(`SELECT status,label,approval_ranges FROM decisions WHERE fingerprint=? AND
+ (scope_type='global' OR (scope_type='kind' AND scope_id=?) OR (scope_type='instance' AND scope_id=?))
+ ORDER BY updated_at DESC,id DESC LIMIT 1`, fp, node.Kind, node.ID).Scan(&status, &label, &ranges)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE fingerprints SET status=?,label=CASE WHEN ?!='' THEN ? ELSE label END,approval_ranges=? WHERE node_id=? AND fingerprint=?`, status, label, label, ranges, node.ID, fp)
+	return err
+}

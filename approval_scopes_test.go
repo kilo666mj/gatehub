@@ -47,6 +47,29 @@ func TestScopedApprovalCapabilityRemovalAndPolicy(t *testing.T) {
 	if err := s.CreateDecision(d); err != nil {
 		t.Fatal(err)
 	}
+	// A scoped preapproval is represented on the first observation too.
+	pre := d
+	pre.Fingerprint = "preapproved"
+	if err := s.CreateDecision(pre); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertObservations(n, []Fingerprint{{Fingerprint: pre.Fingerprint}}); err != nil {
+		t.Fatal(err)
+	}
+	fps, err := s.Fingerprints("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fp := range fps {
+		if fp.Fingerprint == pre.Fingerprint && (fp.Status != decisionApproved || fp.ApprovalRanges == nil) {
+			t.Fatalf("preapproval lost: %+v", fp)
+		}
+	}
+	pre.Status = decisionBlocked
+	pre.ApprovalRanges = nil
+	if err := s.CreateDecision(pre); err != nil {
+		t.Fatal(err)
+	}
 	if rec := pull(true); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"approval_ranges":["192.0.2.0/24"]`) {
 		t.Fatalf("scoped policy: %d %s", rec.Code, rec.Body.String())
 	}
@@ -70,7 +93,7 @@ func TestScopedApprovalCapabilityRemovalAndPolicy(t *testing.T) {
 		t.Fatalf("superseded scope delivered: %d %s", rec.Code, rec.Body.String())
 	}
 	policy, _, err := s.PolicyForNode(n, "")
-	if err != nil || len(policy) != 1 || policy[0].ApprovalRanges != nil {
+	if err != nil || len(policy) != 2 || policy[1].ApprovalRanges != nil {
 		t.Fatalf("effective policy: %+v %v", policy, err)
 	}
 }
