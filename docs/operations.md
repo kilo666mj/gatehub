@@ -124,3 +124,16 @@ policy. Then remove Gatehub configuration from each gate, stop and disable the
 service, archive or destroy the credential-bearing database according to the
 retention policy, and remove public synchronization routes. Removing Gatehub
 does not remove local gate databases or backend authentication.
+
+## Reviewing fingerprint approval conflicts
+
+The grouped fingerprint view flags an **Approval conflict** when the same
+fingerprint is reported approved on one node and blocked on another node of
+the same gate kind. Expand its host list to inspect the node-specific states.
+This includes blocks originating from manual decisions or web enforcement.
+Pending observations and different gate kinds do not count as conflicts.
+
+A conflict is review evidence, not proof that the approved client is hostile.
+Check observation freshness and the current decisions before extending trust,
+especially for common TLS-library fingerprints shared by unrelated programs.
+The report does not change decisions, approvals, or enforcement behavior.
