@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kilo666mj/gatekit/approval"
 	_ "modernc.org/sqlite"
 )
 
@@ -483,31 +484,33 @@ type Store struct {
 }
 
 type Node struct {
-	ID              string `json:"id"`
-	Kind            string `json:"kind"`
-	Host            string `json:"host"`
-	AllowedCertName string `json:"allowed_cert_name"`
-	TokenHash       string `json:"-"`
-	Status          string `json:"status"`
-	LastSeen        string `json:"last_seen,omitempty"`
-	CreatedAt       string `json:"created_at"`
+	SupportsApprovalRanges bool   `json:"supports_approval_ranges"`
+	ID                     string `json:"id"`
+	Kind                   string `json:"kind"`
+	Host                   string `json:"host"`
+	AllowedCertName        string `json:"allowed_cert_name"`
+	TokenHash              string `json:"-"`
+	Status                 string `json:"status"`
+	LastSeen               string `json:"last_seen,omitempty"`
+	CreatedAt              string `json:"created_at"`
 }
 
 type Fingerprint struct {
-	NodeID      string         `json:"node_id"`
-	Kind        string         `json:"kind"`
-	Host        string         `json:"host"`
-	Fingerprint string         `json:"fingerprint"`
-	Status      string         `json:"status"`
-	Label       string         `json:"label,omitempty"`
-	FirstSeen   string         `json:"first_seen,omitempty"`
-	LastSeen    string         `json:"last_seen,omitempty"`
-	IPs         []string       `json:"ips,omitempty"`
-	Ports       []int          `json:"ports,omitempty"`
-	Sightings   []Sighting     `json:"sightings,omitempty"`
-	Count       int            `json:"count,omitempty"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
-	UpdatedAt   string         `json:"updated_at"`
+	ApprovalRanges *approval.Scope `json:"approval_ranges,omitempty"`
+	NodeID         string          `json:"node_id"`
+	Kind           string          `json:"kind"`
+	Host           string          `json:"host"`
+	Fingerprint    string          `json:"fingerprint"`
+	Status         string          `json:"status"`
+	Label          string          `json:"label,omitempty"`
+	FirstSeen      string          `json:"first_seen,omitempty"`
+	LastSeen       string          `json:"last_seen,omitempty"`
+	IPs            []string        `json:"ips,omitempty"`
+	Ports          []int           `json:"ports,omitempty"`
+	Sightings      []Sighting      `json:"sightings,omitempty"`
+	Count          int             `json:"count,omitempty"`
+	Metadata       map[string]any  `json:"metadata,omitempty"`
+	UpdatedAt      string          `json:"updated_at"`
 }
 
 type Sighting struct {
@@ -628,18 +631,20 @@ type FingerprintGroup struct {
 }
 
 type Decision struct {
-	ID          int64  `json:"id"`
-	ScopeType   string `json:"scope_type"`
-	ScopeID     string `json:"scope_id"`
-	Kind        string `json:"kind,omitempty"`
-	Fingerprint string `json:"fingerprint"`
-	Status      string `json:"status"`
-	Label       string `json:"label,omitempty"`
-	UpdatedAt   string `json:"updated_at"`
-	Actor       string `json:"actor"`
-	Source      string `json:"source,omitempty"`
-	ExpiresAt   string `json:"expires_at,omitempty"`
-	Evidence    string `json:"evidence,omitempty"`
+	ApprovalRanges      *approval.Scope `json:"approval_ranges,omitempty"`
+	ClearApprovalRanges bool            `json:"clear_approval_ranges,omitempty"`
+	ID                  int64           `json:"id"`
+	ScopeType           string          `json:"scope_type"`
+	ScopeID             string          `json:"scope_id"`
+	Kind                string          `json:"kind,omitempty"`
+	Fingerprint         string          `json:"fingerprint"`
+	Status              string          `json:"status"`
+	Label               string          `json:"label,omitempty"`
+	UpdatedAt           string          `json:"updated_at"`
+	Actor               string          `json:"actor"`
+	Source              string          `json:"source,omitempty"`
+	ExpiresAt           string          `json:"expires_at,omitempty"`
+	Evidence            string          `json:"evidence,omitempty"`
 }
 
 func NewStore(path string) (*Store, error) {
@@ -753,6 +758,7 @@ func (s *Store) init() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fingerprints_last_seen ON fingerprints(last_seen)`,
 		`CREATE INDEX IF NOT EXISTS idx_fingerprints_status ON fingerprints(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_decisions_fingerprint_order ON decisions(fingerprint, updated_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_decisions_scope ON decisions(scope_type, scope_id, fingerprint, updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_fingerprint_sightings_ip_seen ON fingerprint_sightings(ip, last_seen)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_abuse_signals_ip_seen ON web_abuse_signals(ip, observed_at)`,
@@ -772,6 +778,11 @@ func (s *Store) init() error {
 	}
 	if err := addColumnIfMissing(s.db, "decisions", "evidence_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return err
+	}
+	for _, c := range []struct{ table, name, def string }{{"nodes", "supports_approval_ranges", "INTEGER NOT NULL DEFAULT 0"}, {"decisions", "approval_ranges", "TEXT"}, {"fingerprints", "approval_ranges", "TEXT"}} {
+		if err := addColumnIfMissing(s.db, c.table, c.name, c.def); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -801,6 +812,11 @@ func addColumnIfMissing(db *sql.DB, table, column, def string) (err error) {
 }
 
 func (s *Store) UpsertNode(n Node) error {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+	if err := s.checkNodeScopeCompatibility(n); err != nil {
+		return err
+	}
 	if err := validateNode(n); err != nil {
 		return err
 	}
@@ -840,15 +856,15 @@ func (s *Store) SetNodeStatus(id, status string) error {
 func (s *Store) Node(id string) (Node, error) {
 	var n Node
 	err := s.db.QueryRow(`
-		SELECT id, kind, host, allowed_cert_name, token_hash, status, last_seen, created_at
+		SELECT id, kind, host, allowed_cert_name, token_hash, status, last_seen, created_at, supports_approval_ranges
 		FROM nodes WHERE id = ?`, id).Scan(
-		&n.ID, &n.Kind, &n.Host, &n.AllowedCertName, &n.TokenHash, &n.Status, &n.LastSeen, &n.CreatedAt)
+		&n.ID, &n.Kind, &n.Host, &n.AllowedCertName, &n.TokenHash, &n.Status, &n.LastSeen, &n.CreatedAt, &n.SupportsApprovalRanges)
 	return n, err
 }
 
 func (s *Store) Nodes() (_ []Node, err error) {
 	rows, err := s.db.Query(`
-		SELECT id, kind, host, allowed_cert_name, token_hash, status, last_seen, created_at
+		SELECT id, kind, host, allowed_cert_name, token_hash, status, last_seen, created_at, supports_approval_ranges
 		FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -857,7 +873,7 @@ func (s *Store) Nodes() (_ []Node, err error) {
 	var nodes []Node
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Kind, &n.Host, &n.AllowedCertName, &n.TokenHash, &n.Status, &n.LastSeen, &n.CreatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Host, &n.AllowedCertName, &n.TokenHash, &n.Status, &n.LastSeen, &n.CreatedAt, &n.SupportsApprovalRanges); err != nil {
 			return nil, err
 		}
 		nodes = append(nodes, n)
@@ -931,7 +947,7 @@ func (s *Store) UpsertObservations(node Node, observations []Fingerprint) (err e
 func (s *Store) Fingerprints(status string) (_ []Fingerprint, err error) {
 	query := `
 		SELECT node_id, fingerprint, kind, host, status, label, first_seen, last_seen,
-			ips_json, ports_json, count, metadata_json, updated_at
+			ips_json, ports_json, count, metadata_json, updated_at, approval_ranges
 		FROM fingerprints`
 	args := []any{}
 	if status != "" {
@@ -1337,16 +1353,16 @@ func insertDecisionTx(tx *sql.Tx, d Decision, now string) error {
 		d.Evidence = "{}"
 	}
 	if _, err := tx.Exec(`
-		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json, approval_ranges)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ScopeType, d.ScopeID, d.Kind, d.Fingerprint, d.Status, d.Label, now,
-		d.Actor, d.Source, d.ExpiresAt, d.Evidence); err != nil {
+		d.Actor, d.Source, d.ExpiresAt, d.Evidence, scopeSQL(d.ApprovalRanges)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE fingerprints
-		SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
+		SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?, approval_ranges = ?
 		WHERE node_id = ? AND fingerprint = ?`,
-		d.Status, d.Label, d.Label, now, d.ScopeID, d.Fingerprint); err != nil {
+		d.Status, d.Label, d.Label, now, scopeSQL(d.ApprovalRanges), d.ScopeID, d.Fingerprint); err != nil {
 		return err
 	}
 	_, err := tx.Exec(`INSERT INTO audit_log (actor, action, target, detail, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -1419,35 +1435,38 @@ func (s *Store) CreateDecision(d Decision) (err error) {
 		return err
 	}
 	defer rollbackTransaction(tx, &err)
+	if err := validateScopeTargetsTx(tx, d); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`
-		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.ScopeType, d.ScopeID, d.Kind, d.Fingerprint, d.Status, d.Label, now, d.Actor, d.Source, d.ExpiresAt, d.Evidence); err != nil {
+		INSERT INTO decisions (scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json, approval_ranges)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ScopeType, d.ScopeID, d.Kind, d.Fingerprint, d.Status, d.Label, now, d.Actor, d.Source, d.ExpiresAt, d.Evidence, scopeSQL(d.ApprovalRanges)); err != nil {
 		return err
 	}
 	switch d.ScopeType {
 	case "instance":
 		if _, err := tx.Exec(`
 			UPDATE fingerprints
-			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
+			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?, approval_ranges = ?
 			WHERE node_id = ? AND fingerprint = ?`,
-			d.Status, d.Label, d.Label, now, d.ScopeID, d.Fingerprint); err != nil {
+			d.Status, d.Label, d.Label, now, scopeSQL(d.ApprovalRanges), d.ScopeID, d.Fingerprint); err != nil {
 			return err
 		}
 	case "kind":
 		if _, err := tx.Exec(`
 			UPDATE fingerprints
-			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
+			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?, approval_ranges = ?
 			WHERE kind = ? AND fingerprint = ?`,
-			d.Status, d.Label, d.Label, now, d.ScopeID, d.Fingerprint); err != nil {
+			d.Status, d.Label, d.Label, now, scopeSQL(d.ApprovalRanges), d.ScopeID, d.Fingerprint); err != nil {
 			return err
 		}
 	case "global":
 		if _, err := tx.Exec(`
 			UPDATE fingerprints
-			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?
+			SET status = ?, label = CASE WHEN ? != '' THEN ? ELSE label END, updated_at = ?, approval_ranges = ?
 			WHERE fingerprint = ?`,
-			d.Status, d.Label, d.Label, now, d.Fingerprint); err != nil {
+			d.Status, d.Label, d.Label, now, scopeSQL(d.ApprovalRanges), d.Fingerprint); err != nil {
 			return err
 		}
 	}
@@ -1460,16 +1479,19 @@ func (s *Store) CreateDecision(d Decision) (err error) {
 
 func (s *Store) PolicyForNode(node Node, since string) (_ []Decision, _ string, err error) {
 	query := `
-		SELECT id, scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json
-		FROM decisions
+		SELECT id, scope_type, scope_id, kind, fingerprint, status, label, updated_at, actor, source, expires_at, evidence_json, approval_ranges
+		FROM decisions d
 		WHERE updated_at > ?
 		  AND (
 			(scope_type = 'instance' AND scope_id = ?)
 			OR (scope_type = 'kind' AND scope_id = ?)
 			OR (scope_type = 'global')
 		  )
-		ORDER BY updated_at ASC, id ASC`
-	rows, err := s.db.Query(query, since, node.ID, node.Kind)
+		AND NOT EXISTS (SELECT 1 FROM decisions later WHERE later.fingerprint=d.fingerprint
+ AND (later.scope_type='global' OR (later.scope_type='kind' AND later.scope_id=?) OR (later.scope_type='instance' AND later.scope_id=?))
+ AND (later.updated_at>d.updated_at OR (later.updated_at=d.updated_at AND later.id>d.id)))
+ ORDER BY updated_at ASC, id ASC`
+	rows, err := s.db.Query(query, since, node.ID, node.Kind, node.Kind, node.ID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1478,7 +1500,13 @@ func (s *Store) PolicyForNode(node Node, since string) (_ []Decision, _ string, 
 	cursor := since
 	for rows.Next() {
 		var d Decision
-		if err := rows.Scan(&d.ID, &d.ScopeType, &d.ScopeID, &d.Kind, &d.Fingerprint, &d.Status, &d.Label, &d.UpdatedAt, &d.Actor, &d.Source, &d.ExpiresAt, &d.Evidence); err != nil {
+		var ranges sql.NullString
+		if err := rows.Scan(&d.ID, &d.ScopeType, &d.ScopeID, &d.Kind, &d.Fingerprint, &d.Status, &d.Label, &d.UpdatedAt, &d.Actor, &d.Source, &d.ExpiresAt, &d.Evidence, &ranges); err != nil {
+			return nil, "", err
+		}
+		var err error
+		d.ApprovalRanges, err = decodeScope(ranges)
+		if err != nil {
 			return nil, "", err
 		}
 		decisions = append(decisions, d)
@@ -1503,8 +1531,9 @@ type rowScanner interface {
 func scanFingerprint(rows rowScanner) (Fingerprint, error) {
 	var fp Fingerprint
 	var ips, ports, meta string
+	var ranges sql.NullString
 	if err := rows.Scan(&fp.NodeID, &fp.Fingerprint, &fp.Kind, &fp.Host, &fp.Status, &fp.Label,
-		&fp.FirstSeen, &fp.LastSeen, &ips, &ports, &fp.Count, &meta, &fp.UpdatedAt); err != nil {
+		&fp.FirstSeen, &fp.LastSeen, &ips, &ports, &fp.Count, &meta, &fp.UpdatedAt, &ranges); err != nil {
 		return fp, err
 	}
 	if err := decodeJSON(ips, &fp.IPs); err != nil {
@@ -1516,7 +1545,9 @@ func scanFingerprint(rows rowScanner) (Fingerprint, error) {
 	if err := decodeJSON(meta, &fp.Metadata); err != nil {
 		return fp, err
 	}
-	return fp, nil
+	var err error
+	fp.ApprovalRanges, err = decodeScope(ranges)
+	return fp, err
 }
 
 func (a *app) publicMux() http.Handler {
@@ -1553,6 +1584,7 @@ func (a *app) adminMux() http.Handler {
 	mux.HandleFunc("POST /nodes", a.auth.require(a.handleAdminUpsertNode))
 	mux.HandleFunc("POST /nodes/status", a.auth.require(a.handleAdminNodeStatus))
 	mux.HandleFunc("POST /decisions", a.auth.require(a.handleAdminDecision))
+	mux.HandleFunc("POST /api/decisions", a.auth.require(a.handleAdminDecisionAPI))
 	mux.HandleFunc("GET /api/fingerprints", a.auth.require(a.handleAdminFingerprintsAPI))
 	mux.HandleFunc("GET /api/web-candidates", a.auth.require(a.handleAdminWebCandidatesAPI))
 	mux.HandleFunc("GET /api/smtp-reports", a.auth.require(a.handleAdminSMTPReportsAPI))
@@ -1673,11 +1705,22 @@ func (a *app) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	supported := r.Header.Get("X-Gatekit-Capabilities") == approval.Capability
+	if err := a.store.RecordScopeCapability(node, supported); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 	since := r.URL.Query().Get("since")
 	decisions, cursor, err := a.store.PolicyForNode(node, since)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	for _, d := range decisions {
+		if d.ApprovalRanges != nil && !supported {
+			writeError(w, http.StatusConflict, errors.New("node cannot enforce approval_ranges"))
+			return
+		}
 	}
 	response := map[string]any{"cursor": cursor, "decisions": decisions}
 	if a.trustedSources != nil {
@@ -1994,6 +2037,15 @@ func (a *app) handleAdminDecision(w http.ResponseWriter, r *http.Request) {
 		Label:       r.FormValue("label"),
 		Actor:       "admin",
 	}
+	d.ClearApprovalRanges = r.FormValue("clear_approval_ranges") == "true"
+	if raw := strings.TrimSpace(r.FormValue("approval_ranges")); raw != "" {
+		var err error
+		d.ApprovalRanges, err = approval.New(strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r' }))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	if err := a.store.CreateDecision(d); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -2159,6 +2211,13 @@ func validateNodeToken(token string) error {
 }
 
 func validateDecision(d Decision) error {
+	if err := d.ApprovalRanges.Validate(); err != nil {
+		return err
+	}
+	if d.ApprovalRanges != nil && (d.Status != decisionApproved || d.ClearApprovalRanges) {
+		return errors.New("CIDR scope requires approved status and cannot be combined with clear_approval_ranges")
+	}
+
 	switch d.ScopeType {
 	case "instance", "kind", "global":
 	default:
@@ -2792,7 +2851,10 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
                           <input type="hidden" name="scope_type" value="instance">
                           <select name="status" aria-label="Status for {{.Host}}">{{range $.Statuses}}<option>{{.}}</option>{{end}}</select>
                           <input name="label" value="{{.Label}}" placeholder="label" aria-label="Label for {{.Host}}">
+                          <input name="approval_ranges" placeholder="Approval CIDRs (comma separated)" aria-label="Approval CIDRs for {{.Host}}">
+                          <label><input type="checkbox" name="clear_approval_ranges" value="true">Remove CIDR restriction</label>
                           <button>Apply to host</button>
+                          {{if .ApprovalRanges}}<div class="muted">Approved client ranges: {{range .ApprovalRanges.Ranges}}<code>{{.}}</code> {{end}}</div>{{end}}
                         </form>
                       </div>
                     {{end}}
@@ -2820,6 +2882,8 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
                   <select name="status">{{range $.Statuses}}<option>{{.}}</option>{{end}}</select>
                   <input type="hidden" name="scope_type" value="global">
                   <input name="label" value="{{.Label}}" placeholder="label">
+                  <input name="approval_ranges" placeholder="Approval CIDRs (all nodes must support scopes)">
+                  <label><input type="checkbox" name="clear_approval_ranges" value="true">Remove CIDR restrictions</label>
                   <button>Apply to all hosts</button>
                 </form>
               </td>

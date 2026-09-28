@@ -92,7 +92,7 @@ func TestWebEnforcementBlocksAndExplicitlyExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(decisions) != 2 || decisions[1].Status != decisionPending || decisions[1].Source != "web-automation-expiry" {
+	if len(decisions) != 1 || decisions[0].Status != decisionPending || decisions[0].Source != "web-automation-expiry" {
 		t.Fatalf("expiry decisions = %+v", decisions)
 	}
 

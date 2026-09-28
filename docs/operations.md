@@ -137,3 +137,43 @@ A conflict is review evidence, not proof that the approved client is hostile.
 Check observation freshness and the current decisions before extending trust,
 especially for common TLS-library fingerprints shared by unrelated programs.
 The report does not change decisions, approvals, or enforcement behavior.
+
+
+## Range-scoped approvals
+
+Expand a fingerprint's hosts and enter **Approval CIDRs** to restrict an approved
+fingerprint to those client networks. CIDRs are comma or whitespace separated.
+Each target node must first advertise scope support through an authenticated
+policy request. A group-wide approval is rejected if any target lacks support.
+Registering an incompatible new node under an existing restricted kind/global
+policy is also rejected. Backend authentication is still required.
+
+Existing scopes appear beside each host. Leaving the CIDR field blank cannot
+silently remove a restriction: select **Remove CIDR restriction** explicitly.
+Pending and blocked decisions clear scope. Trusted ranges continue to bypass
+fingerprint policy, including restricted approvals, so check those separately.
+
+The authenticated `POST /api/decisions` JSON endpoint accepts `approval_ranges`
+as a nonempty array of CIDRs, or null for an unrestricted decision. Replacing an
+existing restriction with null also requires `clear_approval_ranges: true`.
+Browser session requests require the normal `X-CSRF-Token` header. For example:
+
+```json
+{
+  "scope_type": "instance",
+  "scope_id": "mail-gateway",
+  "kind": "tlsgate",
+  "fingerprint": "example-fingerprint",
+  "status": "approved",
+  "approval_ranges": ["192.0.2.0/24", "2001:db8:1234::/64"]
+}
+```
+
+Policy pulls return the latest effective decision for each fingerprint. Older
+nodes cannot fetch a restricted approval, including through a cursor that skips
+its original creation. Refused synchronization does not revoke an old cached
+unrestricted approval: upgrade and verify every affected node before creating
+restrictions. Do not downgrade a node to a binary that ignores stored scopes.
+Before rollback, replace restricted approvals with blocks and verify delivery,
+or keep a scope-aware previous binary. CIDRs are fixed policy values; they do not
+automatically track dynamic trusted-source discovery or changing home prefixes.
