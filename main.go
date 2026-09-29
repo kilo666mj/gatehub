@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kilo666mj/gatekit/approval"
+	"go.michaelspost.com/gatekit/approval"
 	_ "modernc.org/sqlite"
 )
 

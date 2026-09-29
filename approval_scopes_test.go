@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/kilo666mj/gatekit/approval"
+	"go.michaelspost.com/gatekit/approval"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"

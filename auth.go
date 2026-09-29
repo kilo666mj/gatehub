@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kilo666mj/oidcrp"
+	"go.michaelspost.com/oidcrp"
 )
 
 const (
