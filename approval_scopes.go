@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/kilo666mj/gatekit/approval"
+	"go.michaelspost.com/gatekit/approval"
 	"net/http"
 )
 

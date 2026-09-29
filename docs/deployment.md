@@ -28,7 +28,7 @@ identity is checked against the optional `--admin-oidc-allowed-{subjects,emails,
 allowlists before a session is issued. Sessions live in the same SQLite database;
 lifetime is `--admin-session-max-age` seconds (default 8h; `0` disables expiry).
 The OIDC relying-party flow is provided by
-[`github.com/kilo666mj/oidcrp`](https://github.com/kilo666mj/oidcrp).
+[`go.michaelspost.com/oidcrp`](https://github.com/kilo666mj/oidcrp).
 
 For localhost-only development you can disable auth with `--admin-auth none`.
 The process refuses to start an OIDC admin listener without an issuer, client ID,
