@@ -919,7 +919,16 @@ func (s *Store) UpsertObservations(node Node, observations []Fingerprint) (err e
 				ports_json = excluded.ports_json,
 				count = excluded.count,
 				metadata_json = excluded.metadata_json,
-				updated_at = excluded.updated_at`,
+				updated_at = excluded.updated_at
+			WHERE fingerprints.kind IS NOT excluded.kind
+			   OR fingerprints.host IS NOT excluded.host
+			   OR (excluded.label != '' AND fingerprints.label IS NOT excluded.label)
+			   OR (fingerprints.first_seen = '' AND fingerprints.first_seen IS NOT excluded.first_seen)
+			   OR fingerprints.last_seen IS NOT excluded.last_seen
+			   OR fingerprints.ips_json IS NOT excluded.ips_json
+			   OR fingerprints.ports_json IS NOT excluded.ports_json
+			   OR fingerprints.count IS NOT excluded.count
+			   OR fingerprints.metadata_json IS NOT excluded.metadata_json`,
 			node.ID, fp.Fingerprint, node.Kind, node.Host, decisionPending, fp.Label, fp.FirstSeen,
 			fp.LastSeen, ips, ports, fp.Count, meta, now); err != nil {
 			return err
@@ -931,7 +940,8 @@ func (s *Store) UpsertObservations(node Node, observations []Fingerprint) (err e
 			if _, err := tx.Exec(`
 				INSERT INTO fingerprint_sightings (node_id, fingerprint, ip, port, last_seen)
 				VALUES (?, ?, ?, ?, ?)
-				ON CONFLICT(node_id, fingerprint, ip, port) DO UPDATE SET last_seen = excluded.last_seen`,
+					ON CONFLICT(node_id, fingerprint, ip, port) DO UPDATE SET last_seen = excluded.last_seen
+					WHERE fingerprint_sightings.last_seen IS NOT excluded.last_seen`,
 				node.ID, fp.Fingerprint, sighting.IP, sighting.Port, sighting.LastSeen); err != nil {
 				return err
 			}
