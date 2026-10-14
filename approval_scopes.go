@@ -161,6 +161,10 @@ func applyCurrentDecisionTx(tx *sql.Tx, node Node, fp string) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`UPDATE fingerprints SET status=?,label=CASE WHEN ?!='' THEN ? ELSE label END,approval_ranges=? WHERE node_id=? AND fingerprint=?`, status, label, label, ranges, node.ID, fp)
+	_, err = tx.Exec(`UPDATE fingerprints
+ SET status=?,label=CASE WHEN ?!='' THEN ? ELSE label END,approval_ranges=?
+ WHERE node_id=? AND fingerprint=?
+   AND (status IS NOT ? OR (?!='' AND label IS NOT ?) OR approval_ranges IS NOT ?)`,
+		status, label, label, ranges, node.ID, fp, status, label, label, ranges)
 	return err
 }
