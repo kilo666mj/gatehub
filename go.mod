@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	go.michaelspost.com/gatekit v0.7.1
 	go.michaelspost.com/oidcrp v0.4.1
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
