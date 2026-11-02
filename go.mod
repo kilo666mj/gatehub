@@ -3,15 +3,15 @@ module gatehub
 go 1.27.1
 
 require (
-	go.michaelspost.com/gatekit v0.7.1
-	go.michaelspost.com/oidcrp v0.4.1
+	go.michaelspost.com/gatekit v0.7.2
+	go.michaelspost.com/oidcrp v0.4.2
 	modernc.org/sqlite v1.61.1
 )
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.6 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.7 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
