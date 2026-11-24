@@ -3,7 +3,7 @@ module gatehub
 go 1.27.1
 
 require (
-	go.michaelspost.com/gatekit v0.7.3
+	go.michaelspost.com/gatekit v0.7.4
 	go.michaelspost.com/oidcrp v0.4.5
 	modernc.org/sqlite v1.63.0
 )
